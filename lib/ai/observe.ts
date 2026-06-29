@@ -1,0 +1,65 @@
+import { startObservation } from "@langfuse/tracing";
+import { langfuseEnabled } from "@/lib/observability/langfuse";
+import { AiAdapter, BuiltCard, ExtractionResult, PersonLite, Signal } from "./types";
+
+// Wrap any AiAdapter so each call shows up in Langfuse as a generation with its
+// input, output, the engine used (mock / claude / claude-cli), and errors. The
+// wrapper is adapter-agnostic, so the API path, the `claude -p` path, and the
+// offline mock are all traced the same way. No keys -> returns the adapter as-is.
+
+export function observed(adapter: AiAdapter): AiAdapter {
+  if (!langfuseEnabled) return adapter;
+  const model = adapter.label;
+
+  return {
+    label: adapter.label,
+
+    async extract(input): Promise<ExtractionResult> {
+      const gen = startObservation(
+        "membro.extract",
+        { model, input: { text: input.text, hasImage: !!input.imageBase64, today: input.today } },
+        { asType: "generation" },
+      );
+      try {
+        const out = await adapter.extract(input);
+        gen.update({ output: out, metadata: { adapter: adapter.label, people: out.entities.length } }).end();
+        return out;
+      } catch (e) {
+        gen.update({ level: "ERROR", statusMessage: (e as Error).message }).end();
+        throw e;
+      }
+    },
+
+    async buildCard(signal: Signal, today: string): Promise<BuiltCard> {
+      const gen = startObservation(
+        "membro.buildCard",
+        { model, input: { signal, today } },
+        { asType: "generation" },
+      );
+      try {
+        const out = await adapter.buildCard(signal, today);
+        gen.update({ output: out, metadata: { adapter: adapter.label, kind: out.kind, signal: signal.type } }).end();
+        return out;
+      } catch (e) {
+        gen.update({ level: "ERROR", statusMessage: (e as Error).message }).end();
+        throw e;
+      }
+    },
+
+    async brief(person: PersonLite, facts: string[], today: string): Promise<string> {
+      const gen = startObservation(
+        "membro.brief",
+        { model, input: { person: person.name, facts } },
+        { asType: "generation" },
+      );
+      try {
+        const out = await adapter.brief(person, facts, today);
+        gen.update({ output: out, metadata: { adapter: adapter.label } }).end();
+        return out;
+      } catch (e) {
+        gen.update({ level: "ERROR", statusMessage: (e as Error).message }).end();
+        throw e;
+      }
+    },
+  };
+}

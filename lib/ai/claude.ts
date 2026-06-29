@@ -1,0 +1,136 @@
+import Anthropic from "@anthropic-ai/sdk";
+import {
+  AiAdapter,
+  BuiltCard,
+  CARD_SCHEMA,
+  EXTRACTION_SCHEMA,
+  ExtractionResult,
+  PersonLite,
+  Signal,
+} from "./types";
+
+// Opus 4.8 is the house default; override with MEMBRO_MODEL if you want to trade
+// some quality for cost (e.g. claude-sonnet-4-6).
+const MODEL = process.env.MEMBRO_MODEL || "claude-opus-4-8";
+
+function client() {
+  return new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+}
+
+// Pull the first text block (structured-output mode guarantees it is valid JSON).
+function firstText(message: Anthropic.Message): string {
+  for (const block of message.content) {
+    if (block.type === "text") return block.text;
+  }
+  return "";
+}
+
+export class ClaudeAdapter implements AiAdapter {
+  readonly label = "claude";
+
+  async extract(input: {
+    text: string;
+    today: string;
+    existingNames: string[];
+    imageBase64?: string;
+    imageMediaType?: string;
+  }): Promise<ExtractionResult> {
+    const system = [
+      "You are the memory engine for Membro, a personal CRM for one busy professional.",
+      "From a raw note (typed, dictated, or read off a screenshot) extract the PEOPLE mentioned and the durable facts about each one.",
+      "One note can mention several people — split the note and route each fragment to the right person (this is the core feature).",
+      `Today is ${input.today}; resolve relative dates ("next week", "Thursday") to absolute ISO datetimes in due_at.`,
+      "Fact kinds: 'commitment' = something the NOTE-TAKER promised to do; 'date' = a one-off dated event; 'preference' = how the person likes things; 'fact' = anything else worth remembering.",
+      "Set birthday only when a birthday is explicitly mentioned. Keep blurb to a short who-they-are line.",
+      "confidence is 0..1: 1.0 when the person is unambiguous, lower (~0.5) when the name could collide with someone already known.",
+      input.existingNames.length
+        ? `People already on file (reuse the exact name when it is the same person): ${input.existingNames.join(", ")}.`
+        : "No people are on file yet.",
+      "Return only people actually described. If the note has no people, return an empty entities array.",
+    ].join("\n");
+
+    const userContent: Anthropic.ContentBlockParam[] = [];
+    if (input.imageBase64) {
+      userContent.push({
+        type: "image",
+        source: {
+          type: "base64",
+          media_type: (input.imageMediaType as "image/png" | "image/jpeg" | "image/webp" | "image/gif") || "image/png",
+          data: input.imageBase64,
+        },
+      });
+    }
+    userContent.push({
+      type: "text",
+      text: input.text || "Read the people and facts out of the attached image.",
+    });
+
+    const message = await client().messages.create({
+      model: MODEL,
+      max_tokens: 4096,
+      system,
+      messages: [{ role: "user", content: userContent }],
+      output_config: { format: { type: "json_schema", schema: EXTRACTION_SCHEMA } },
+    } as Anthropic.MessageCreateParamsNonStreaming);
+
+    return JSON.parse(firstText(message)) as ExtractionResult;
+  }
+
+  async buildCard(signal: Signal, today: string): Promise<BuiltCard> {
+    const system = [
+      "You are the night-shift chief of staff for Membro. You turn a 'ripe' relationship signal into ONE finished card the owner can approve in seconds.",
+      "Write in the owner's voice: warm, direct, plain English, no em-dashes, no corporate filler. The body must be a ready-to-send message or a tight brief, not advice about what to write.",
+      "Never invent facts not given. 'why' is one sentence explaining what triggered this card.",
+      `Today is ${today}.`,
+    ].join("\n");
+
+    const message = await client().messages.create({
+      model: MODEL,
+      max_tokens: 1024,
+      system,
+      messages: [{ role: "user", content: describeSignal(signal) }],
+      output_config: { format: { type: "json_schema", schema: CARD_SCHEMA } },
+    } as Anthropic.MessageCreateParamsNonStreaming);
+
+    return JSON.parse(firstText(message)) as BuiltCard;
+  }
+
+  async brief(person: PersonLite, facts: string[], today: string): Promise<string> {
+    const system = [
+      "You are Membro's meeting-prep engine. Write a short, scannable brief that gets the owner ready to walk into a conversation with this person.",
+      "Lead with one ice-breaker grounded in a real fact. Then 2-4 bullets of what to remember and any open follow-ups. Plain English, no em-dashes, no filler.",
+      `Today is ${today}.`,
+    ].join("\n");
+
+    const message = await client().messages.create({
+      model: MODEL,
+      max_tokens: 1024,
+      system,
+      messages: [
+        {
+          role: "user",
+          content: `Person: ${person.name}${person.role ? `, ${person.role}` : ""}${
+            person.company ? ` at ${person.company}` : ""
+          }.\nWhat we know:\n- ${facts.join("\n- ") || "(nothing yet)"}`,
+        },
+      ],
+    } as Anthropic.MessageCreateParamsNonStreaming);
+
+    return firstText(message).trim();
+  }
+}
+
+function describeSignal(signal: Signal): string {
+  switch (signal.type) {
+    case "birthday":
+      return `Signal: BIRTHDAY. ${signal.person.name}'s birthday is in ${signal.daysUntil} day(s). Known facts: ${signal.facts.join("; ") || "none"}. Write a 'nudge' card: a short, personal birthday message ready to send.`;
+    case "commitment":
+      return `Signal: COMMITMENT. The owner promised ${signal.person.name}: "${signal.commitment}"${signal.dueLabel ? ` (due ${signal.dueLabel})` : ""}. Other facts: ${signal.facts.join("; ") || "none"}. Write a 'brief' card reminding the owner to deliver, with a one-line message they can send if they need more time.`;
+    case "meeting":
+      return `Signal: MEETING. The owner is meeting ${signal.person.name} ${signal.whenLabel}. Facts: ${signal.facts.join("; ") || "none"}. Write a 'brief' card: a tight prep note with one ice-breaker and the open items to raise.`;
+    case "cold":
+      return `Signal: COLD. The owner has not spoken with ${signal.person.name} in ${signal.daysSince} days. Facts: ${signal.facts.join("; ") || "none"}. Write a 'nudge' card: a warm, low-pressure reconnect message ready to send.`;
+    case "connector":
+      return `Signal: CONNECTOR. ${signal.personA.name} and ${signal.personB.name} are both connected to "${signal.shared}". Facts: ${signal.facts.join("; ") || "none"}. Write a 'connector' card: a short, ready-to-send intro that explains why these two should meet.`;
+  }
+}

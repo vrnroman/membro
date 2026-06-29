@@ -9,9 +9,7 @@
     "lint": "eslint .",
     "test": "tsx tests/pipeline.ts",
     "test:langfuse": "tsx tests/langfuse-smoke.ts",
-    "gen:icons": "node scripts/generate-icons.mjs",
-    "setup": "bash scripts/setup.sh",
-    "deploy": "bash scripts/deploy.sh"
+    "gen:icons": "node scripts/generate-icons.mjs"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.106.0",

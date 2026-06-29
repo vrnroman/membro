@@ -1,122 +1,139 @@
 # Membro
 
-**Your memory for the people you work with.** Capture a note — by typing, dictating, or
-photographing an email or screen — and Membro parses it, files what matters under the right
-person, reminds you before it's relevant, and drafts the prep so you walk into the next
-conversation already ready.
+**Your memory for the people you work with.** Capture a note, by typing, talking, or
+photographing an email, and Membro files what matters under the right person, reminds you
+before it's relevant, and drafts the prep so you walk into the next conversation already ready.
 
-The name is *memory + brother*: a second brain for names, facts, birthdays, and the small
+The name is *memory + brother*: a second brain for the names, facts, birthdays, and small
 promises that are easy to forget.
 
-> **Status:** v1 is built and verified. It can run on Supabase, or fully **local-first**
-> (SQLite) with no cloud slot. The AI runs on your Claude subscription via `claude -p`, so
-> there are no per-call API charges.
+## Why it's different
 
----
+Most CRMs make you do the data entry, for a sales pipeline you didn't ask for. Membro does the
+entry for you, and it never sells you anything.
+
+- **It files itself.** You capture a raw note. The Scatter splits it across everyone mentioned
+  and files the facts, dates, and promises. You do no data entry.
+- **It works while you sleep.** The Night Shift drafts your nudges, intros, and prep briefs into
+  the Stack. Nothing is ever sent for you. You approve, edit, and copy.
+- **It runs on your machine, on your own Claude subscription.** No cloud database. No per-call
+  API bill. Your relationships never leave your box.
 
 ## What it does
 
-- **Capture** — type, dictate (desktop mic or your phone keyboard's mic), or snap a photo of
-  a screen or email. One note can mention several people.
-- **The Scatter** — the AI splits a note across everyone in it and files facts, dates,
-  birthdays, and the promises you made. A confidence gate files what it's sure of and
-  quarantines what's ambiguous instead of guessing.
-- **People** — a searchable index (cold contacts dimmed) with a profile per person: facts,
-  promises you owe, a next-meeting date, and a one-tap **prep brief**.
-- **The Night Shift** — a small crew runs on demand: *Scout* finds what's ripe, *Builder*
-  writes it, *Gate* ranks it. Finished cards land in **The Stack**: a "you owe Tom the deck"
-  nudge, a ready-to-send birthday note, a send-ready intro between two people who should meet.
-  You approve, edit, copy, or skip — you never compose from scratch, and **nothing is ever
-  sent automatically**. "Why this" shows the reasoning.
-
----
+- **Capture.** Type a note, dictate one (your phone records the audio and the server transcribes
+  it), or snap a photo of a screen or email. One note can mention several people.
+- **The Scatter.** The AI splits a note across everyone in it and files facts, dates, birthdays,
+  and the promises you made. A confidence gate files what it is sure of and quarantines what is
+  ambiguous, instead of guessing.
+- **People.** A searchable index (cold contacts dimmed) with a profile per person: facts, promises
+  you owe, a next-meeting date, and a one-tap prep brief. Every fact has a delete control, and
+  removing a fact also removes the Stack card it produced, so a bad voice transcription is easy to
+  take back.
+- **The Night Shift.** A small crew runs on demand. *Scout* finds what is ripe, *Builder* writes
+  it, *Gate* ranks it. Finished cards land in **The Stack**: a "you owe someone the deck" nudge, a
+  ready birthday note, a send-ready intro between two people who should meet. You approve, edit,
+  copy, or skip. You never compose from scratch, and nothing is ever sent automatically. "Why this"
+  shows the reasoning behind every card.
 
 ## How it works
 
-**Stack:** Next.js (App Router, Cache Components) · Supabase (Postgres + auth + RLS) ·
-Vercel (hosting) · Tailwind + shadcn/ui · installable PWA.
+**Stack:** Next.js (App Router) over a local SQLite file via better-sqlite3, with Tailwind and
+shadcn/ui. It installs as a PWA, so it lives on your phone's home screen.
 
-**The AI is behind a swappable adapter** (`lib/ai/index.ts`) so the same pipeline runs three ways:
+**Local-first data.** Everything is one SQLite file that only this server process touches. There
+is no network database to expose. The file lives wherever `MEMBRO_DATA_DIR` points, and it runs in
+WAL mode so reads never block on a write. Membro is single-user: there is no account system inside
+the app, because you gate the whole thing to one identity with your own auth (see Self-hosting).
 
-| Engine | When it's used | Set explicitly with |
+**The AI is behind a swappable adapter** (`lib/ai/index.ts`), so the same pipeline runs three ways:
+
+| Engine | When it runs | Set with |
 | --- | --- | --- |
-| `claude -p` (your subscription) | running locally — the default | `MEMBRO_AI=cli` |
+| `claude -p` on your subscription | the default, when the Claude CLI is installed and logged in | `MEMBRO_AI=cli` |
 | Anthropic API | when `ANTHROPIC_API_KEY` is set | `MEMBRO_AI=api` |
-| Offline mock (deterministic) | on a stock Vercel deploy with no key | `MEMBRO_AI=mock` |
+| Offline mock (deterministic) | no key and no CLI, for tests and CI | `MEMBRO_AI=mock` |
 
-The `claude -p` path only works where the Claude CLI is installed and logged in (your own
-machine), not a stock Vercel serverless function.
+**Voice is the one exception, and it is narrow.** Recorded audio goes to Google Gemini for
+transcription only (`lib/ai/transcribe.ts`). Claude still does all of the extraction, the cards,
+and the briefs. Gemini is primed with the names already on file plus your house terms, so it spells
+the people you work with correctly.
 
-**Observability:** every AI call (`extract` / `buildCard` / `brief`, in any engine) is traced
-to [Langfuse](https://langfuse.com) as a generation with its input, output, the engine used,
-and any error. It's wired once in `lib/ai/observe.ts` and turns on automatically when the
-`LANGFUSE_*` env vars are present — a no-op when they're absent.
+**What leaves your machine.** Note text goes to Claude (your subscription, or the Anthropic API if
+you choose it). Voice audio goes to Gemini for transcription. Everything else, the whole database,
+stays local.
 
----
+**Observability (optional).** Every AI call is traced to [Langfuse](https://langfuse.com) with its
+input, output, the engine used, and any error. It is wired once in `lib/ai/observe.ts` and turns on
+only when the `LANGFUSE_*` vars are present.
 
 ## Run it
 
 ```bash
 npm install
-npm run dev          # http://localhost:3000 — uses `claude -p` automatically
+npm run dev          # http://localhost:3000, uses claude -p automatically
 ```
 
-To run the full UI on Supabase you need a Supabase project and its env vars in `.env.local`;
-alternatively run it local-first against SQLite (no cloud project required).
-
-No key or database is needed to exercise the core logic:
+The `claude -p` engine needs the Claude CLI installed and logged in. No key and no database are
+needed to exercise the core logic:
 
 ```bash
-npm test               # keyless end-to-end pipeline test (capture → scatter → scout → build)
-npm run build          # production build check
-npm run test:langfuse  # send a few traces and confirm they land (needs LANGFUSE_* vars)
+npm test             # keyless end-to-end pipeline: capture, scatter, scout, build
+npm run build        # production build check
 ```
 
----
+## Self-hosting
+
+Membro is single-user by design, so the security model is simple: run it on an always-on host and
+put your own gate in front of it.
+
+1. Run `npm run build`, then `npm start` (it serves on loopback).
+2. Point a reverse proxy at it and require auth. Anything works: an OAuth proxy tied to your own
+   identity, a VPN, or basic auth on your LAN. The app itself has no login, so this gate is what
+   keeps your data yours.
+3. Set `MEMBRO_DATA_DIR` to a persistent disk so the SQLite file survives restarts. Back it up like
+   any other file.
+4. Keep secrets (the Gemini key, any Langfuse keys) in the host environment, never in the repo.
 
 ## Environment
 
-Put these in `.env.local` (gitignored). Keep a backup of the secret values somewhere safe
-outside the repo — a password manager, or a local file that is never committed.
-
 | Variable | Purpose |
 | --- | --- |
-| `NEXT_PUBLIC_SUPABASE_URL` | Supabase project URL |
-| `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY` | Supabase anon/publishable key |
-| `ANTHROPIC_API_KEY` | optional — forces the Anthropic API engine |
-| `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY` / `LANGFUSE_BASE_URL` | Langfuse tracing (region `https://jp.cloud.langfuse.com`) |
-| `MEMBRO_AI` | `cli` \| `api` \| `mock` — override the engine choice |
+| `MEMBRO_DATA_DIR` | directory for the SQLite file (defaults to `./data`) |
+| `MEMBRO_AI` | `cli`, `api`, or `mock`: pick the engine (defaults to `cli`) |
+| `MEMBRO_CLAUDE_BIN` / `MEMBRO_CLAUDE_MODEL` | path to the `claude` binary, and the model, for the `claude -p` engine |
+| `ANTHROPIC_API_KEY` | optional: switches the engine to the Anthropic API |
+| `MEMBRO_MODEL` | Anthropic model id for the API engine (defaults to `claude-opus-4-8`) |
+| `GEMINI_API_KEY` | required for voice notes (transcription only) |
+| `MEMBRO_GEMINI_MODEL` | Gemini model for transcription (defaults to `gemini-2.5-flash`) |
+| `MEMBRO_HOUSE_TERMS` | comma-separated product or client words to spell correctly in transcription, kept out of the codebase |
+| `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY` / `LANGFUSE_BASE_URL` | optional tracing |
 | `MEMBRO_FORCE_MOCK=1` | force the offline engine |
-| `MEMBRO_MODEL` | Anthropic model id (default `claude-opus-4-8`) |
-| `MEMBRO_CLAUDE_BIN` / `MEMBRO_CLAUDE_MODEL` | path to the `claude` binary / model for the `claude -p` engine |
 
-The three `LANGFUSE_*` vars are also set on the Vercel `membro` project (encrypted, all
-environments); they take effect on the next deploy.
-
----
+Put these in the host environment or a local `.env` that is never committed. See `.env.example`.
 
 ## Key files
 
 ```
-lib/ai/                 the AI contract
+lib/db.ts               the SQLite connection and schema (people, facts, captures, cards)
+lib/repo.ts             typed queries, including delete-a-fact-with-cascade
+lib/ai/
   types.ts              schemas for extract / buildCard / brief
   index.ts              the engine switch (cli / api / mock)
-  claude-cli.ts         your subscription via `claude -p`
+  claude-cli.ts         your subscription via claude -p
   claude.ts             the Anthropic API engine
-  mock.ts               deterministic offline engine
+  mock.ts               the deterministic offline engine
+  transcribe.ts         Gemini voice-to-text (transcription only)
   observe.ts            Langfuse tracing wrapper (engine-agnostic)
 lib/nightshift/scout.ts the deterministic "what is ripe" logic (pure, unit-tested)
-lib/observability/      Langfuse OpenTelemetry setup
-lib/membro/types.ts     shared UI row/card types
-app/api/                capture · nightshift · brief — the server routes
-components/membro/       the UI (capture box, people index, profile, stack, today, agenda)
-supabase/migrations/    schema + row-level security
+app/api/                capture, nightshift, brief, transcribe, and the people/facts/cards routes
+components/membro/      the UI (capture box, people index, profile, stack, today, agenda)
 ```
-
----
 
 ## Principles
 
 - **No auto-send, ever.** Cards are drafts you send yourself by copy. Hard rule.
 - **A confidence gate, not a guess.** Ambiguous facts are quarantined, not filed wrong.
-- **Free to run.** Everything is on free tiers; the AI runs on your existing Claude subscription.
+- **You can take it back.** Delete a fact and the action it caused goes with it.
+- **Local and private.** The database never leaves your machine, and the AI runs on your own Claude
+  subscription.

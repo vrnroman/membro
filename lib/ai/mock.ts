@@ -1,5 +1,7 @@
 import type {
   AiAdapter,
+  AssistContextPerson,
+  AssistOutput,
   BuiltCard,
   ExtractedEntity,
   ExtractedFact,
@@ -143,7 +145,7 @@ export class MockAdapter implements AiAdapter {
     return { entities: [...byKey.values()] };
   }
 
-  async buildCard(signal: Signal, today: string): Promise<BuiltCard> {
+  async buildCard(signal: Signal): Promise<BuiltCard> {
     switch (signal.type) {
       case "birthday":
         return {
@@ -165,6 +167,13 @@ export class MockAdapter implements AiAdapter {
           title: `Prep for ${signal.person.name} (${signal.whenLabel})`,
           body: `Ice-breaker: ${signal.facts[0] || "ask how things are going"}.\nRemember:\n- ${signal.facts.slice(0, 3).join("\n- ") || "nothing on file yet"}`,
           why: `You have a meeting with ${signal.person.name} ${signal.whenLabel}.`,
+        };
+      case "dated":
+        return {
+          kind: "brief",
+          title: `Coming up: ${truncate(signal.event, 40)} (${signal.whenLabel})`,
+          body: `"${signal.event}" is ${signal.whenLabel}. Anything to prepare for ${signal.person.name}?`,
+          why: `A dated event involving ${signal.person.name} is ${signal.whenLabel}.`,
         };
       case "cold":
         return {
@@ -192,7 +201,56 @@ export class MockAdapter implements AiAdapter {
       ...(facts.length ? facts.slice(0, 4).map((f) => `- ${f}`) : ["- nothing on file yet"]),
     ].join("\n");
   }
+
+  // Deterministic classifier + starter, good enough to drive the assistant path
+  // offline and in tests. It never invents facts: a draft just wraps the note.
+  async assist(input: { note: string; today: string; people: AssistContextPerson[] }): Promise<AssistOutput> {
+    const note = (input.note || "").trim();
+    const who = input.people[0]?.name;
+    const first = who ? who.split(" ")[0] : "there";
+
+    if (ASSIST_TASK.test(note)) {
+      return {
+        kind: "draft",
+        title: who ? `Draft for ${who}` : "Draft ready",
+        body: `Hi ${first},\n\n${capitalize(note.replace(/[.!?]+$/, ""))}. Sending this over now; let me know if anything needs a change.\n\nBest`,
+        why: "The note reads like something you need to send.",
+      };
+    }
+    if (ASSIST_SITUATION.test(note)) {
+      return {
+        kind: "advisory",
+        title: who ? `How to handle ${who}` : "A read on this",
+        body: `Read: this looks like a moment to address directly and early, before it grows.\n\nDraft reply:\nHi ${first}, thanks for flagging this. Let me take a proper look and get back to you shortly.`,
+        why: "The note reads like a situation you may want to respond to.",
+      };
+    }
+    // A first-person reflection is a diary entry even if it names someone
+    // ("I felt proud after my chat with Tom") — the feeling is about the owner.
+    if (ASSIST_DIARY.test(note)) {
+      return { kind: "diary", title: "Diary entry", body: "", why: "A personal reflection about you." };
+    }
+    return { kind: "none", title: "", body: "", why: "Nothing to start from this one." };
+  }
+
+  async reflect(entries: string[]): Promise<string> {
+    if (!entries.length) {
+      return "Nothing in your diary yet. Capture a note about how you are doing and I'll reflect it back.";
+    }
+    return [
+      "Looking back at your recent notes:",
+      ...entries.slice(0, 5).map((e) => `- ${e}`),
+      "",
+      "One thing to carry forward: notice what gave you energy this week and make room for more of it.",
+    ].join("\n");
+  }
 }
+
+// Heuristics for the offline classifier. Order at the call site is task, then
+// situation, then diary, then nothing.
+const ASSIST_TASK = /\b(send|sending|draft|write|prepare|prep|email|reply|respond|follow up|get back to|deck|slides|proposal|deliver|circle back)\b/i;
+const ASSIST_SITUATION = /\b(annoyed|upset|worried|frustrated|unhappy|awkward|tension|angry|concerned|pushed? back|how (do|should) i|what (do|should) i|what to (say|respond))\b/i;
+const ASSIST_DIARY = /\b(i'?m|i am|i was|i feel|i felt|feeling|anxious|nervous|tired|exhausted|excited|proud|grateful|stressed|overwhelmed|burnt out|burned out)\b/i;
 
 function capitalize(s: string): string {
   return s.length ? s[0].toUpperCase() + s.slice(1) : s;

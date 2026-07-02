@@ -4,7 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { Input } from "@/components/ui/input";
 import { PersonRow, FactRow } from "@/lib/membro/types";
-import { COLD_DAYS } from "@/lib/nightshift/scout";
+import { COLD_DAYS, SELF_ID } from "@/lib/nightshift/scout";
 
 function relativeDays(iso: string): string {
   const d = Math.round((Date.now() - Date.parse(iso)) / 86400000);
@@ -25,7 +25,8 @@ export function PeopleIndex() {
     (async () => {
       const res = await fetch("/api/snapshot", { cache: "no-store" });
       const data = await res.json();
-      setPeople((data.people ?? []) as PersonRow[]);
+      // Hide the reserved diary row; it has its own Diary tab.
+      setPeople(((data.people ?? []) as PersonRow[]).filter((p) => p.id !== SELF_ID));
       setFacts((data.facts ?? []) as FactRow[]);
       setLoading(false);
     })();

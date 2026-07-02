@@ -1,6 +1,6 @@
 import { startObservation } from "@langfuse/tracing";
 import { langfuseEnabled } from "@/lib/observability/langfuse";
-import { AiAdapter, BuiltCard, ExtractionResult, PersonLite, Signal } from "./types";
+import { AiAdapter, AssistOutput, BuiltCard, ExtractionResult, PersonLite, Signal } from "./types";
 
 // Wrap any AiAdapter so each call shows up in Langfuse as a generation with its
 // input, output, the engine used (mock / claude / claude-cli), and errors. The
@@ -54,6 +54,38 @@ export function observed(adapter: AiAdapter): AiAdapter {
       );
       try {
         const out = await adapter.brief(person, facts, today);
+        gen.update({ output: out, metadata: { adapter: adapter.label } }).end();
+        return out;
+      } catch (e) {
+        gen.update({ level: "ERROR", statusMessage: (e as Error).message }).end();
+        throw e;
+      }
+    },
+
+    async assist(input): Promise<AssistOutput> {
+      const gen = startObservation(
+        "membro.assist",
+        { model, input: { note: input.note, today: input.today, people: input.people.map((p) => p.name) } },
+        { asType: "generation" },
+      );
+      try {
+        const out = await adapter.assist(input);
+        gen.update({ output: out, metadata: { adapter: adapter.label, kind: out.kind } }).end();
+        return out;
+      } catch (e) {
+        gen.update({ level: "ERROR", statusMessage: (e as Error).message }).end();
+        throw e;
+      }
+    },
+
+    async reflect(entries: string[], today: string): Promise<string> {
+      const gen = startObservation(
+        "membro.reflect",
+        { model, input: { entries } },
+        { asType: "generation" },
+      );
+      try {
+        const out = await adapter.reflect(entries, today);
         gen.update({ output: out, metadata: { adapter: adapter.label } }).end();
         return out;
       } catch (e) {

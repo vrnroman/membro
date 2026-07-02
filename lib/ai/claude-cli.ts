@@ -1,6 +1,8 @@
 import { execFile } from "node:child_process";
 import {
   AiAdapter,
+  AssistContextPerson,
+  AssistOutput,
   BuiltCard,
   ExtractionResult,
   PersonLite,
@@ -106,6 +108,38 @@ export class ClaudeCliAdapter implements AiAdapter {
     ].join("\n");
     return (await runClaude(prompt)).trim();
   }
+
+  async assist(input: { note: string; today: string; people: AssistContextPerson[] }): Promise<AssistOutput> {
+    const context = input.people.length
+      ? input.people.map((p) => `- ${p.name}: ${p.facts.slice(0, 6).join("; ") || "(no facts yet)"}`).join("\n")
+      : "(no specific people)";
+    const prompt = [
+      "You are Membro's assistant. The owner just captured a note. Classify it and, when it warrants, START the work so the owner only reviews.",
+      "Pick ONE kind:",
+      "- 'draft': a task the owner must produce something for (send an email, reply, write a doc, prep a deck). body = the ready-to-send draft in the owner's voice; for slides write a tight markdown outline. Ground it in the known facts; never invent specifics.",
+      "- 'advisory': a situation or a 'what do I say back'. body = a one-paragraph read of what is going on and what to watch, then a drafted reply the owner can send.",
+      "- 'diary': a first-person reflection about the OWNER themselves (a feeling, a personal event), not about another person. body = empty.",
+      "- 'none': nothing to start; pure information already saved. body = empty.",
+      "Only pick 'draft' or 'advisory' when there is real work to start; when unsure, pick 'none'. Plain English, no em-dashes. title is a short label; why is one sentence.",
+      `Today is ${input.today}.`,
+      'Output ONLY a JSON object: {"kind":"draft"|"advisory"|"diary"|"none","title":string,"body":string,"why":string}.',
+      "",
+      `NOTE:\n${input.note}`,
+      "",
+      `PEOPLE THE NOTE IS ABOUT:\n${context}`,
+    ].join("\n");
+    return parseJsonObject<AssistOutput>(await runClaude(prompt));
+  }
+
+  async reflect(entries: string[], today: string): Promise<string> {
+    const prompt = [
+      "You are Membro's diary companion. These are the owner's own recent first-person notes about themselves.",
+      "Write a short, warm reflection: what stands out, any pattern worth noticing, one gentle prompt for the days ahead. Speak to the owner as 'you'. Plain English, no em-dashes, no therapy-speak. Output the reflection text only, no preamble.",
+      `Today is ${today}.`,
+      `Recent entries:\n- ${entries.join("\n- ") || "(nothing yet)"}`,
+    ].join("\n");
+    return (await runClaude(prompt)).trim();
+  }
 }
 
 function describeSignal(signal: Signal): string {
@@ -116,6 +150,8 @@ function describeSignal(signal: Signal): string {
       return `Signal: COMMITMENT. The owner promised ${signal.person.name}: "${signal.commitment}"${signal.dueLabel ? ` (due ${signal.dueLabel})` : ""}. Facts: ${signal.facts.join("; ") || "none"}. Write a 'brief' reminding the owner to deliver, with a one-line message they can send if they need more time.`;
     case "meeting":
       return `Signal: MEETING. The owner meets ${signal.person.name} ${signal.whenLabel}. Facts: ${signal.facts.join("; ") || "none"}. Write a 'brief': a tight prep note with one ice-breaker and the open items.`;
+    case "dated":
+      return `Signal: DATED EVENT. "${signal.event}" involving ${signal.person.name} is ${signal.whenLabel}. Facts: ${signal.facts.join("; ") || "none"}. Write a 'brief' reminding the owner what is coming up and anything to prepare.`;
     case "cold":
       return `Signal: COLD. No contact with ${signal.person.name} in ${signal.daysSince} days. Facts: ${signal.facts.join("; ") || "none"}. Write a 'nudge': a warm low-pressure reconnect message ready to send.`;
     case "connector":

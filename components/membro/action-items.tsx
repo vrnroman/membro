@@ -3,7 +3,7 @@
 import { useState } from "react";
 import Link from "next/link";
 import { scout, isActionSignal, PersonRow, FactRow } from "@/lib/nightshift/scout";
-import { Cake, CalendarClock, Circle, Loader2 } from "lucide-react";
+import { Cake, CalendarClock, CalendarDays, Circle, Loader2 } from "lucide-react";
 
 // The certain to-do list: what the owner needs to do soon, drawn straight from
 // the data (no AI) so every item is grounded — a promise they made, a meeting
@@ -94,6 +94,28 @@ export function ActionItems({
                 </span>
                 <span className={`shrink-0 text-xs tabular-nums ${dueTone(s.whenLabel)}`}>{s.whenLabel}</span>
               </Link>
+            </li>
+          );
+        }
+        if (s.type === "dated") {
+          const busy = saving === s.factId;
+          return (
+            <li key={i} className="flex items-center gap-3 px-4 py-3 text-sm">
+              <button
+                type="button"
+                onClick={() => s.factId && markDone(s.factId)}
+                disabled={busy || !s.factId}
+                aria-label="Mark done"
+                title="Mark done"
+                className="shrink-0 text-muted-foreground hover:text-foreground disabled:opacity-50"
+              >
+                {busy ? <Loader2 className="h-5 w-5 animate-spin" /> : <CalendarDays className="h-5 w-5" />}
+              </button>
+              <Link href={`/protected/people/${s.person.id}`} className="flex-1 leading-snug hover:underline">
+                {s.event}{" "}
+                <span className="text-muted-foreground">({s.person.name})</span>
+              </Link>
+              <span className={`shrink-0 text-xs tabular-nums ${dueTone(s.whenLabel)}`}>{s.whenLabel}</span>
             </li>
           );
         }

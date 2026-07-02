@@ -1,7 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { db } from "./db";
 import type { PersonRow, FactRow } from "@/lib/nightshift/scout";
-import type { Card } from "@/lib/membro/types";
+import { SELF_ID } from "@/lib/nightshift/scout";
+import type { Card, Assist } from "@/lib/membro/types";
 
 // Thin typed repository over SQLite. Each function mirrors a query the app used
 // to run against Supabase, so the routes and components read the same shapes.
@@ -156,10 +157,14 @@ export function deleteFact(id: string): void {
 }
 
 // ── Captures ────────────────────────────────────────────────────────────────
-export function insertCapture(body: string, sourceType: string): void {
+// Returns the new capture id so the assistant pass can tie its output back to the
+// exact note (and replace it, not duplicate it, on a re-run).
+export function insertCapture(body: string, sourceType: string): string {
+  const id = randomUUID();
   db()
     .prepare("insert into captures (id, body, source_type, created_at) values (?, ?, ?, ?)")
-    .run(randomUUID(), body, sourceType, now());
+    .run(id, body, sourceType, now());
+  return id;
 }
 
 // ── Cards (The Stack) ─────────────────────────────────────────────────────────
@@ -219,4 +224,102 @@ export function insertCards(
 export function updateCard(id: string, patch: { status?: Card["status"]; body?: string }): void {
   if (patch.status !== undefined) db().prepare("update cards set status = ? where id = ?").run(patch.status, id);
   if (patch.body !== undefined) db().prepare("update cards set body = ? where id = ?").run(patch.body, id);
+}
+
+// ── Assists (the assistant's per-note drafts / advisories) ────────────────────
+type AssistRowDB = Omit<Assist, "meta"> & { meta: string };
+
+function hydrateAssist(r: AssistRowDB): Assist {
+  let meta: Record<string, unknown> = {};
+  try {
+    meta = JSON.parse(r.meta);
+  } catch {
+    /* keep {} */
+  }
+  return { ...r, meta };
+}
+
+// Only pending assists reach the dashboard (the UI shows nothing else), so scope
+// the query rather than returning every assist ever written on each snapshot.
+export function listPendingAssists(): Assist[] {
+  return (
+    db().prepare("select * from assists where status = 'pending' order by created_at desc").all() as AssistRowDB[]
+  ).map(hydrateAssist);
+}
+
+export function insertAssist(a: {
+  capture_id: string | null;
+  person_id: string | null;
+  kind: Assist["kind"];
+  title: string;
+  body: string;
+  why: string | null;
+  meta?: Record<string, unknown>;
+}): void {
+  db()
+    .prepare(
+      `insert into assists (id, capture_id, person_id, kind, title, body, why, meta, created_at)
+       values (@id, @capture_id, @person_id, @kind, @title, @body, @why, @meta, @created_at)`,
+    )
+    .run({
+      id: randomUUID(),
+      capture_id: a.capture_id,
+      person_id: a.person_id,
+      kind: a.kind,
+      title: a.title,
+      body: a.body,
+      why: a.why,
+      meta: JSON.stringify(a.meta ?? {}),
+      created_at: now(),
+    });
+}
+
+export function updateAssist(id: string, patch: { status?: Assist["status"]; body?: string }): void {
+  if (patch.status !== undefined) db().prepare("update assists set status = ? where id = ?").run(patch.status, id);
+  if (patch.body !== undefined) db().prepare("update assists set body = ? where id = ?").run(patch.body, id);
+}
+
+// Idempotency for the async worker: a re-run of the same note clears its old
+// output first, so a retry never leaves two drafts behind.
+export function deleteAssistsForCapture(captureId: string): void {
+  db().prepare("delete from assists where capture_id = ?").run(captureId);
+}
+
+export function countPendingAssists(): number {
+  return (db().prepare("select count(*) as n from assists where status = 'pending'").get() as { n: number }).n;
+}
+
+// ── Diary (the owner's own thread on the reserved self row) ───────────────────
+export function getOrCreateSelf(): { id: string; name: string } {
+  const existing = db().prepare("select id, name from people where id = ?").get(SELF_ID) as
+    | { id: string; name: string }
+    | undefined;
+  if (existing) return existing;
+  const ts = now();
+  db()
+    .prepare(
+      `insert into people (id, name, last_contact_at, created_at, updated_at) values (?, 'You', ?, ?, ?)`,
+    )
+    .run(SELF_ID, ts, ts, ts);
+  return { id: SELF_ID, name: "You" };
+}
+
+// File a diary entry on the self thread, tagged with its source note. Rerun of
+// the same note replaces (see deleteDiaryForCapture in the worker's transaction),
+// so a genuinely repeated note on a different day is kept while a retry is safe.
+export function insertDiaryEntry(content: string, captureId: string | null): void {
+  getOrCreateSelf();
+  db()
+    .prepare(
+      `insert into facts (id, person_id, kind, content, capture_id, confidence, created_at)
+       values (?, ?, 'fact', ?, ?, 1, ?)`,
+    )
+    .run(randomUUID(), SELF_ID, content, captureId, now());
+  touchPerson(SELF_ID);
+}
+
+// Clear any diary entry previously filed from this note, so the worker can
+// re-file it exactly once on a retry.
+export function deleteDiaryForCapture(captureId: string): void {
+  db().prepare("delete from facts where person_id = ? and capture_id = ?").run(SELF_ID, captureId);
 }

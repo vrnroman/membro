@@ -4,5 +4,8 @@
 export async function register() {
   if (process.env.NEXT_RUNTIME === "nodejs") {
     await import("@/lib/observability/langfuse");
+    // Drain voice notes that got parked when Gemini was rate-limited.
+    const { startVoiceWorker } = await import("@/lib/voice/worker");
+    startVoiceWorker();
   }
 }

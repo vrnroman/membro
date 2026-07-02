@@ -1,9 +1,15 @@
 // Keyless end-to-end test of the Membro pipeline: capture -> scatter -> scout ->
 // build cards, all on the deterministic mock. Run with: npm test
 import { MockAdapter } from "@/lib/ai/mock";
-import { scout, PersonRow, FactRow } from "@/lib/nightshift/scout";
+import { scout, horizon, isActionSignal, PersonRow, FactRow } from "@/lib/nightshift/scout";
 
 const TODAY = "2026-06-27";
+
+function addDays(iso: string, days: number): string {
+  const d = new Date(`${iso}T00:00:00.000Z`);
+  d.setUTCDate(d.getUTCDate() + days);
+  return d.toISOString().slice(0, 10);
+}
 
 const DEMO =
   "Just got out of the team sync. Maya got promoted to product lead, and she spent two years in our Berlin office before this. Her son Leo just started kindergarten. Tom mentioned his birthday is next week, and I promised to send him the Q3 deck before Thursday. Priya is moving to the Berlin office next month and wants to connect with anyone who has worked there.";
@@ -62,7 +68,7 @@ async function main() {
   }
 
   // 4. Builder turns each signal into a finished card.
-  const cards = await Promise.all(signals.map((s) => mock.buildCard(s, TODAY)));
+  const cards = await Promise.all(signals.map((s) => mock.buildCard(s)));
   check("every card has a non-empty body", cards.every((c) => c.body.trim().length > 0));
   check("every card has a why", cards.every((c) => c.why.trim().length > 0));
   check("a connector card was built", cards.some((c) => c.kind === "connector"));
@@ -83,6 +89,49 @@ async function main() {
   // 5. Brief generation.
   const brief = await mock.brief({ id: "p0", name: "Maya", company: null, role: null, blurb: null }, ["Got promoted to product lead"]);
   check("brief is non-empty", brief.trim().length > 0);
+
+  // 6. Assistant classifier: the note starts the right kind of work.
+  const task = await mock.assist({ note: "I promised to send Tom the Q3 deck by Thursday.", today: TODAY, people: [{ name: "Tom", facts: [] }] });
+  check("task note -> draft", task.kind === "draft" && task.body.trim().length > 0, `got ${task.kind}`);
+  const situation = await mock.assist({ note: "My manager seemed annoyed and I am not sure what to say back.", today: TODAY, people: [] });
+  check("situation note -> advisory", situation.kind === "advisory" && situation.body.trim().length > 0, `got ${situation.kind}`);
+  const diary = await mock.assist({ note: "I felt calm and grateful after a good run.", today: TODAY, people: [] });
+  check("first-person note -> diary", diary.kind === "diary", `got ${diary.kind}`);
+  const diaryNamed = await mock.assist({ note: "I felt proud after my chat with Tom.", today: TODAY, people: [{ name: "Tom", facts: [] }] });
+  check("first-person note naming a person -> still diary", diaryNamed.kind === "diary", `got ${diaryNamed.kind}`);
+  const info = await mock.assist({ note: "Priya joined the platform team.", today: TODAY, people: [{ name: "Priya", facts: [] }] });
+  check("plain info -> none", info.kind === "none", `got ${info.kind}`);
+
+  // 7. Dated events: a soon date is an Action item, a far one is on the horizon.
+  const datedPeople: PersonRow[] = [
+    { id: "d1", name: "Nadia", company: null, role: null, blurb: null, birthday: null, next_meeting_at: null, last_contact_at: `${TODAY}T12:00:00Z` },
+  ];
+  const datedFacts: FactRow[] = [
+    { id: "df1", person_id: "d1", kind: "date", content: "Product launch", due_at: `${addDays(TODAY, 10)}T09:00:00Z`, status: "open" },
+    { id: "df2", person_id: "d1", kind: "date", content: "Offsite in Lisbon", due_at: `${addDays(TODAY, 60)}T09:00:00Z`, status: "open" },
+  ];
+  const datedSignals = scout(datedPeople, datedFacts, TODAY, 50);
+  const soon = datedSignals.find((s) => s.type === "dated");
+  check("soon dated event is a dated action signal", !!soon && isActionSignal(soon), `types: ${datedSignals.map((s) => s.type).join(",")}`);
+  check("far dated event is NOT an action signal", !datedSignals.some((s) => s.type === "dated" && (s as { event: string }).event === "Offsite in Lisbon"));
+  const far = horizon(datedPeople, datedFacts, TODAY);
+  check("far dated event is on the horizon", far.length === 1 && far[0].event === "Offsite in Lisbon", `horizon: ${far.map((e) => e.event).join(",")}`);
+
+  // Overdue open date facts must not fall through both surfaces.
+  const overdueFacts: FactRow[] = [
+    { id: "df3", person_id: "d1", kind: "date", content: "Missed launch", due_at: `${addDays(TODAY, -5)}T09:00:00Z`, status: "open" },
+  ];
+  const overdueSignals = scout(datedPeople, overdueFacts, TODAY, 50);
+  const overdue = overdueSignals.find((s) => s.type === "dated");
+  check("overdue open date is still a dated action item", !!overdue && (overdue as { whenLabel: string }).whenLabel === "overdue", `types: ${overdueSignals.map((s) => s.type).join(",")}`);
+  check("overdue date is not on the horizon", horizon(datedPeople, overdueFacts, TODAY).length === 0);
+
+  // 8. The diary self row never produces a relationship signal.
+  const selfPeople: PersonRow[] = [
+    { id: "self", name: "You", company: null, role: null, blurb: null, birthday: null, next_meeting_at: null, last_contact_at: "2020-01-01T00:00:00Z" },
+  ];
+  const selfFacts: FactRow[] = [{ id: "sf1", person_id: "self", kind: "commitment", content: "meditate", due_at: null, status: "open" }];
+  check("self row yields no signals", scout(selfPeople, selfFacts, TODAY).length === 0);
 
   console.log("");
   if (failures) {

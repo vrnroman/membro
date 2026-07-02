@@ -22,6 +22,30 @@ export type ExtractedEntity = {
 
 export type ExtractionResult = { entities: ExtractedEntity[] };
 
+// The per-note assistant pass. After a note is saved, this classifies it and,
+// when it warrants, starts the work: a ready-to-send draft for a task, a read +
+// drafted reply for a situation, or routing a first-person note to the diary.
+//   draft    = the note is a task the owner needs to produce something for;
+//              body is the ready-to-send email / message (slides = a markdown
+//              outline for now).
+//   advisory = the note is a situation or a "what do I say back"; body is a short
+//              read plus a drafted reply.
+//   diary    = a first-person note about the owner themselves; body is empty
+//              (the note text becomes a diary entry).
+//   none     = nothing to start (pure info already captured as facts).
+export type AssistKind = "draft" | "advisory" | "diary" | "none";
+
+export type AssistOutput = {
+  kind: AssistKind;
+  title: string; // short label for the card
+  body: string; // the draft / advisory text ("" for diary / none)
+  why: string; // one line: what made this worth starting
+};
+
+// A person the note is about, with what we already know, so the drafter can
+// ground a reply in real facts instead of writing from a blank page.
+export type AssistContextPerson = { name: string; facts: string[] };
+
 // A "ripe" item the deterministic Scout found. The AI Builder turns one of these
 // into a finished card. Person snapshots are plain objects so the Builder is
 // pure with respect to the database.
@@ -37,6 +61,7 @@ export type Signal =
   | { type: "birthday"; person: PersonLite; daysUntil: number; facts: string[] }
   | { type: "commitment"; person: PersonLite; commitment: string; dueLabel: string | null; facts: string[]; factId?: string }
   | { type: "meeting"; person: PersonLite; whenLabel: string; facts: string[] }
+  | { type: "dated"; person: PersonLite; event: string; whenLabel: string; daysUntil: number; facts: string[]; factId?: string }
   | { type: "cold"; person: PersonLite; daysSince: number; facts: string[] }
   | { type: "connector"; personA: PersonLite; personB: PersonLite; shared: string; facts: string[] };
 
@@ -52,6 +77,10 @@ export interface AiAdapter {
   extract(input: { text: string; today: string; existingNames: string[]; imageBase64?: string; imageMediaType?: string }): Promise<ExtractionResult>;
   buildCard(signal: Signal, today: string): Promise<BuiltCard>;
   brief(person: PersonLite, facts: string[], today: string): Promise<string>;
+  // Per-note assistant: classify a freshly captured note and start the work.
+  assist(input: { note: string; today: string; people: AssistContextPerson[] }): Promise<AssistOutput>;
+  // Diary reflection: a short memo over the owner's own recent entries.
+  reflect(entries: string[], today: string): Promise<string>;
 }
 
 // JSON Schemas handed to Claude's structured-output mode so the model is forced
@@ -98,6 +127,18 @@ export const CARD_SCHEMA = {
   additionalProperties: false,
   properties: {
     kind: { type: "string", enum: ["connector", "nudge", "brief"] },
+    title: { type: "string" },
+    body: { type: "string" },
+    why: { type: "string" },
+  },
+  required: ["kind", "title", "body", "why"],
+} as const;
+
+export const ASSIST_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    kind: { type: "string", enum: ["draft", "advisory", "diary", "none"] },
     title: { type: "string" },
     body: { type: "string" },
     why: { type: "string" },

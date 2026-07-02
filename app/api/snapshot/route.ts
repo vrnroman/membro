@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { listPeople, listFacts, listCards } from "@/lib/repo";
+import { listPeople, listFacts, listCards, listPendingAssists } from "@/lib/repo";
 
 // One round-trip for the dashboard: everything Today and People need to render.
 export const runtime = "nodejs";
@@ -10,5 +10,6 @@ export async function GET() {
     people: listPeople(),
     facts: listFacts(),
     cards: listCards(),
+    assists: listPendingAssists(),
   });
 }

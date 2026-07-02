@@ -7,5 +7,8 @@ export async function register() {
     // Drain voice notes that got parked when Gemini was rate-limited.
     const { startVoiceWorker } = await import("@/lib/voice/worker");
     startVoiceWorker();
+    // Drain the assistant queue: draft / advise / diary each captured note.
+    const { startAssistWorker } = await import("@/lib/assist/worker");
+    startAssistWorker();
   }
 }

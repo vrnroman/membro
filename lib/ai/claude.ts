@@ -1,6 +1,9 @@
 import Anthropic from "@anthropic-ai/sdk";
 import {
   AiAdapter,
+  AssistContextPerson,
+  AssistOutput,
+  ASSIST_SCHEMA,
   BuiltCard,
   CARD_SCHEMA,
   EXTRACTION_SCHEMA,
@@ -118,6 +121,50 @@ export class ClaudeAdapter implements AiAdapter {
 
     return firstText(message).trim();
   }
+
+  async assist(input: { note: string; today: string; people: AssistContextPerson[] }): Promise<AssistOutput> {
+    const system = [
+      "You are Membro's assistant. The owner just captured a note. Classify it and, when it warrants, START the work so the owner only has to review.",
+      "Choose ONE kind:",
+      "- 'draft': the note is a task the owner must produce something for (send an email, reply, write a doc, prep a deck). body = the ready-to-send draft in the owner's voice. For slides, write a tight markdown outline. Ground it in the known facts; never invent specifics.",
+      "- 'advisory': the note is a situation or a 'what do I say back'. body = two short parts: a one-paragraph read of what is going on and what to watch, then a drafted reply the owner can send.",
+      "- 'diary': the note is a first-person reflection about the OWNER themselves (a feeling, a personal event), not about another person. body = \"\".",
+      "- 'none': nothing to start; it is pure information already saved. body = \"\".",
+      "Only pick 'draft' or 'advisory' when there is real work to start. When unsure between none and the others, pick 'none'. Plain English, no em-dashes. title is a short label. why is one sentence.",
+      `Today is ${input.today}.`,
+    ].join("\n");
+
+    const context = input.people.length
+      ? input.people.map((p) => `- ${p.name}: ${p.facts.slice(0, 6).join("; ") || "(no facts yet)"}`).join("\n")
+      : "(no specific people)";
+
+    const message = await client().messages.create({
+      model: MODEL,
+      max_tokens: 1500,
+      system,
+      messages: [{ role: "user", content: `NOTE:\n${input.note}\n\nPEOPLE THE NOTE IS ABOUT:\n${context}` }],
+      output_config: { format: { type: "json_schema", schema: ASSIST_SCHEMA } },
+    } as Anthropic.MessageCreateParamsNonStreaming);
+
+    return JSON.parse(firstText(message)) as AssistOutput;
+  }
+
+  async reflect(entries: string[], today: string): Promise<string> {
+    const system = [
+      "You are Membro's diary companion. These are the owner's own recent first-person notes about themselves.",
+      "Write a short, warm reflection: what stands out, any pattern worth noticing, one gentle prompt for the days ahead. Speak to the owner as 'you'. Plain English, no em-dashes, no therapy-speak, no preamble.",
+      `Today is ${today}.`,
+    ].join("\n");
+
+    const message = await client().messages.create({
+      model: MODEL,
+      max_tokens: 1024,
+      system,
+      messages: [{ role: "user", content: `Recent entries:\n- ${entries.join("\n- ") || "(nothing yet)"}` }],
+    } as Anthropic.MessageCreateParamsNonStreaming);
+
+    return firstText(message).trim();
+  }
 }
 
 function describeSignal(signal: Signal): string {
@@ -128,6 +175,8 @@ function describeSignal(signal: Signal): string {
       return `Signal: COMMITMENT. The owner promised ${signal.person.name}: "${signal.commitment}"${signal.dueLabel ? ` (due ${signal.dueLabel})` : ""}. Other facts: ${signal.facts.join("; ") || "none"}. Write a 'brief' card reminding the owner to deliver, with a one-line message they can send if they need more time.`;
     case "meeting":
       return `Signal: MEETING. The owner is meeting ${signal.person.name} ${signal.whenLabel}. Facts: ${signal.facts.join("; ") || "none"}. Write a 'brief' card: a tight prep note with one ice-breaker and the open items to raise.`;
+    case "dated":
+      return `Signal: DATED EVENT. "${signal.event}" involving ${signal.person.name} is ${signal.whenLabel}. Facts: ${signal.facts.join("; ") || "none"}. Write a 'brief' card reminding the owner what is coming up and anything to prepare.`;
     case "cold":
       return `Signal: COLD. The owner has not spoken with ${signal.person.name} in ${signal.daysSince} days. Facts: ${signal.facts.join("; ") || "none"}. Write a 'nudge' card: a warm, low-pressure reconnect message ready to send.`;
     case "connector":

@@ -7,6 +7,7 @@ import {
 } from "@/lib/repo";
 import { getAdapter } from "@/lib/ai";
 import { ExtractedEntity } from "@/lib/ai/types";
+import { enqueueAssistJob } from "@/lib/assist/queue";
 
 // The capture core: turn a note (typed, transcribed voice, or a photo) into
 // people + facts on file. Lives here — not in the route — so the /api/capture
@@ -73,7 +74,18 @@ export async function fileNote(input: CaptureInput): Promise<CaptureResult> {
   });
 
   // Keep the raw input for audit / show-the-work.
-  insertCapture(text || "(image)", sourceType);
+  const captureId = insertCapture(text || "(image)", sourceType);
+
+  // Hand the note to the assistant to start any work it warrants (a draft, a
+  // situation read, a diary entry). Async and best-effort: a note is saved
+  // regardless, and the queue only carries text notes (an image has none yet).
+  if (text.trim()) {
+    try {
+      enqueueAssistJob({ captureId, note: text.trim(), firstAttemptAt: new Date().toISOString() });
+    } catch {
+      /* never let the assistant queue block a capture from landing */
+    }
+  }
 
   const landed: CaptureResult["landed"] = [];
   const ambiguous: CaptureResult["ambiguous"] = [];

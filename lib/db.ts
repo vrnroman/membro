@@ -18,8 +18,19 @@ export function db(): Database.Database {
   d.pragma("journal_mode = WAL"); // concurrent reads while a write is in flight
   d.pragma("foreign_keys = ON"); // honour ON DELETE CASCADE
   d.exec(SCHEMA);
+  migrate(d);
   _db = d;
   return d;
+}
+
+// Additive column migrations for tables that predate a column. SQLite cannot add
+// a column by re-running CREATE, so bring existing databases up to the current
+// schema here. Idempotent: only adds a column that is missing.
+function migrate(d: Database.Database): void {
+  const factCols = (d.prepare("pragma table_info(facts)").all() as { name: string }[]).map((c) => c.name);
+  // capture_id ties a diary entry to its source note so a worker re-run replaces
+  // it (rerun-safety) while genuinely repeated notes on different days are kept.
+  if (!factCols.includes("capture_id")) d.exec("alter table facts add column capture_id text");
 }
 
 // Single-user app: no user_id, no row-level security (the whole app is gated to
@@ -49,6 +60,7 @@ create table if not exists facts (
   due_at     text,
   status     text not null default 'open' check (status in ('open','done')),
   confidence real not null default 1,
+  capture_id text,
   created_at text not null
 );
 create index if not exists facts_person_idx on facts (person_id, created_at desc);
@@ -93,4 +105,41 @@ create table if not exists voice_jobs (
   updated_at      text not null
 );
 create index if not exists voice_jobs_due_idx on voice_jobs (status, next_attempt_at);
+
+-- The assistant's output for a captured note: a ready-to-send draft or a
+-- situation read + reply. Separate from cards (which are per-person signals from
+-- the nightly sweep) because assists are per-note, carry a source-capture
+-- lineage, and are produced the moment a note lands. The owner reviews them on
+-- Suggestions with the same approve / copy / edit / skip affordances as cards.
+create table if not exists assists (
+  id          text primary key,
+  capture_id  text,                       -- source note; lets a re-run replace, not duplicate
+  -- ON DELETE SET NULL (not cascade): an assist belongs to its note, not the
+  -- person. Deleting a loosely-matched person must never wipe a pending draft.
+  person_id   text references people (id) on delete set null,  -- who it's about, when known
+  kind        text not null check (kind in ('draft','advisory')),
+  title       text not null,
+  body        text not null,
+  why         text,
+  status      text not null default 'pending' check (status in ('pending','approved','skipped')),
+  meta        text not null default '{}',
+  created_at  text not null
+);
+create index if not exists assists_status_idx on assists (status, created_at desc);
+
+-- Durable queue for the async assistant pass, mirroring voice_jobs: a note is
+-- saved first (never lost), then a background worker classifies it and starts
+-- the work, retrying with backoff if the AI call fails.
+create table if not exists assist_jobs (
+  id              text primary key,
+  capture_id      text,
+  note            text not null,
+  status          text not null default 'queued' check (status in ('queued','done','failed')),
+  attempts        integer not null default 0,
+  next_attempt_at text not null,
+  last_error      text,
+  created_at      text not null,
+  updated_at      text not null
+);
+create index if not exists assist_jobs_due_idx on assist_jobs (status, next_attempt_at);
 `;

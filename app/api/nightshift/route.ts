@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { listPeople, listFacts, deletePendingCards, insertCards } from "@/lib/repo";
 import { getAdapter } from "@/lib/ai";
-import { scout } from "@/lib/nightshift/scout";
+import { scout, isIdeaSignal } from "@/lib/nightshift/scout";
 import { Signal } from "@/lib/ai/types";
 
 export const runtime = "nodejs";
@@ -24,7 +24,10 @@ export async function POST() {
   const facts = listFacts();
 
   const today = new Date().toISOString().slice(0, 10);
-  const signals = scout(people, facts, today);
+  // The night shift only drafts the speculative outreach (intros, reconnects).
+  // Certain items (commitments, meetings, birthdays, dated events) are handled
+  // as Action items on Today, so drafting them here would just duplicate them.
+  const signals = scout(people, facts, today, 100).filter(isIdeaSignal);
 
   const adapter = getAdapter();
 

@@ -27,17 +27,23 @@ export type FactRow = {
 export const COLD_DAYS = 45;
 export const BIRTHDAY_WINDOW = 30;
 export const MEETING_WINDOW = 7;
+export const DATED_WINDOW = 30; // a one-off dated event this close is an action item
+
+// The owner's own diary thread lives on a reserved "person" row so it reuses the
+// people/facts storage. It is never a relationship: the Scout skips it, and the
+// People index hides it (the Diary tab is its surface).
+export const SELF_ID = "self";
 
 // Certainty split, used to route what the Scout finds to the right screen.
 // "Action" signals are grounded in a date the owner set or something they said
 // directly (a meeting, a promise, a birthday) — clear to-dos. "Idea" signals are
 // speculative things the owner may or may not act on (a heuristic intro, a nudge
 // to reconnect) and live on the opt-in Suggestions screen.
-export type ActionSignal = Extract<Signal, { type: "meeting" | "commitment" | "birthday" }>;
+export type ActionSignal = Extract<Signal, { type: "meeting" | "commitment" | "birthday" | "dated" }>;
 export type IdeaSignal = Extract<Signal, { type: "connector" | "cold" }>;
 
 export function isActionSignal(s: Signal): s is ActionSignal {
-  return s.type === "meeting" || s.type === "commitment" || s.type === "birthday";
+  return s.type === "meeting" || s.type === "commitment" || s.type === "birthday" || s.type === "dated";
 }
 
 export function isIdeaSignal(s: Signal): s is IdeaSignal {
@@ -95,6 +101,7 @@ function meetingLabel(today: string, whenISO: string): string {
 }
 
 export function scout(people: PersonRow[], facts: FactRow[], today: string, limit = 8): Signal[] {
+  people = people.filter((p) => p.id !== SELF_ID); // the diary thread is never a signal
   const factsByPerson = new Map<string, FactRow[]>();
   for (const f of facts) {
     const arr = factsByPerson.get(f.person_id) || [];
@@ -126,6 +133,31 @@ export function scout(people: PersonRow[], facts: FactRow[], today: string, limi
           signal: { type: "commitment", person: lite(p), commitment: f.content, dueLabel, facts: recentFacts(p.id), factId: f.id },
           rank: 10 + (f.due_at ? Math.max(0, dayDiff(today, f.due_at)) : 5),
         });
+      }
+    }
+
+    // One-off dated events coming up (a deadline, a trip, a recital). These are
+    // already extracted with an absolute due_at but were never surfaced before.
+    for (const f of pf) {
+      if (f.kind === "date" && f.status === "open" && f.due_at) {
+        const d = dayDiff(today, f.due_at);
+        // Include overdue (d < 0): an open past-due date stays an action item
+        // ("overdue") until dismissed, rather than vanishing from both this list
+        // and the horizon. Only future-far events (d > window) go to the horizon.
+        if (d <= DATED_WINDOW) {
+          signals.push({
+            signal: {
+              type: "dated",
+              person: lite(p),
+              event: f.content,
+              whenLabel: meetingLabel(today, f.due_at),
+              daysUntil: d,
+              facts: recentFacts(p.id),
+              factId: f.id,
+            },
+            rank: 15 + d,
+          });
+        }
       }
     }
 
@@ -180,4 +212,30 @@ export function scout(people: PersonRow[], facts: FactRow[], today: string, limi
     .sort((a, b) => a.rank - b.rank)
     .slice(0, limit)
     .map((s) => s.signal);
+}
+
+export type HorizonEvent = {
+  personId: string;
+  personName: string;
+  event: string;
+  due_at: string;
+  daysUntil: number;
+};
+
+// Dated events too far out to be an action item yet: a quiet "on the horizon"
+// band so nothing you told Membro silently disappears until its day arrives.
+// The complement of the `dated` signal, which covers the next DATED_WINDOW days.
+export function horizon(people: PersonRow[], facts: FactRow[], today: string, limit = 20): HorizonEvent[] {
+  const nameById = new Map(people.filter((p) => p.id !== SELF_ID).map((p) => [p.id, p.name]));
+  const out: HorizonEvent[] = [];
+  for (const f of facts) {
+    if (f.kind !== "date" || f.status !== "open" || !f.due_at) continue;
+    const name = nameById.get(f.person_id);
+    if (!name) continue; // skip self and orphaned facts
+    const d = dayDiff(today, f.due_at);
+    if (d > DATED_WINDOW) {
+      out.push({ personId: f.person_id, personName: name, event: f.content, due_at: f.due_at, daysUntil: d });
+    }
+  }
+  return out.sort((a, b) => a.daysUntil - b.daysUntil).slice(0, limit);
 }

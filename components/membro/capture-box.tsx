@@ -10,7 +10,9 @@ const SAMPLE =
 type Result = {
   landed: { person: string; created: boolean; facts: number }[];
   ambiguous: { name: string; reason: string }[];
-  adapter: string;
+  adapter?: string;
+  transcript?: string;
+  queued?: boolean; // Gemini was busy; the note is filing itself in the background
 };
 
 // Pick a recording format the browser supports AND that Gemini accepts.
@@ -33,7 +35,7 @@ export function CaptureBox({ onCaptured }: { onCaptured: () => void }) {
   const [text, setText] = useState("");
   const [busy, setBusy] = useState(false);
   const [recording, setRecording] = useState(false);
-  const [transcribing, setTranscribing] = useState(false);
+  const [filing, setFiling] = useState(false); // voice note: transcribing + filing in one shot
   const [seconds, setSeconds] = useState(0);
   const [voiceError, setVoiceError] = useState<string | null>(null);
   const [result, setResult] = useState<Result | null>(null);
@@ -82,22 +84,6 @@ export function CaptureBox({ onCaptured }: { onCaptured: () => void }) {
     send({ text, sourceType: "text" });
   }
 
-  // Insert transcribed text at the cursor, keeping whatever was already typed.
-  function insertTranscript(chunk: string) {
-    const piece = chunk.trim();
-    if (!piece) return;
-    const ta = taRef.current;
-    setText((prev) => {
-      const start = ta?.selectionStart ?? prev.length;
-      const end = ta?.selectionEnd ?? prev.length;
-      const before = prev.slice(0, start);
-      const after = prev.slice(end);
-      const lead = before && !/\s$/.test(before) ? " " : "";
-      const trail = after && !/^\s/.test(after) ? " " : "";
-      return before + lead + piece + trail + after;
-    });
-  }
-
   function blobToBase64(blob: Blob): Promise<string> {
     return new Promise((resolve, reject) => {
       const reader = new FileReader();
@@ -107,30 +93,39 @@ export function CaptureBox({ onCaptured }: { onCaptured: () => void }) {
     });
   }
 
-  async function transcribe(blob: Blob, mime: string) {
-    lastAudioRef.current = { blob, mime };
-    setTranscribing(true);
+  // Recognition + remembering in one action: send the audio, it transcribes and
+  // files itself. No transcript to read, no second tap. Anything already typed in
+  // the box rides along as context and the box is cleared once it's filed.
+  async function fileVoice(blob: Blob, mime: string) {
+    lastAudioRef.current = { blob, mime }; // kept so one tap can retry if it fails
+    setFiling(true);
     setVoiceError(null);
+    setError(null);
+    setResult(null);
     try {
       const audioBase64 = await blobToBase64(blob);
-      const res = await fetch("/api/transcribe", {
+      const prefix = taRef.current?.value ?? ""; // read live, not a stale closure
+      const res = await fetch("/api/voice", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ audioBase64, mimeType: mime }),
+        body: JSON.stringify({ audioBase64, mimeType: mime, text: prefix }),
       });
       const data = await res.json();
-      if (!res.ok) throw new Error(data.error || "transcription failed");
-      if (data.text) {
-        insertTranscript(data.text);
-        lastAudioRef.current = null; // landed — drop the kept audio
-      } else {
+      if (!res.ok) throw new Error(data.error || "voice capture failed");
+      if (data.empty) {
+        // Nothing heard — keep the audio so a retry is one tap, keep any typed text.
         setVoiceError("Didn't catch any speech. Tap retry or type it in.");
+        return;
       }
+      lastAudioRef.current = null; // filed, or safely parked in the background — drop the audio
+      setText("");
+      setResult(data);
+      onCaptured();
     } catch (e) {
       // Keep the audio so one tap can retry instead of losing the note.
-      setVoiceError((e as Error).message || "Transcription failed.");
+      setVoiceError((e as Error).message || "Voice capture failed.");
     } finally {
-      setTranscribing(false);
+      setFiling(false);
     }
   }
 
@@ -158,7 +153,7 @@ export function CaptureBox({ onCaptured }: { onCaptured: () => void }) {
         if (cancelledRef.current) return;
         const actualMime = recorder.mimeType || mime || "audio/mp4";
         const blob = new Blob(chunksRef.current, { type: actualMime });
-        if (blob.size > 0) transcribe(blob, actualMime);
+        if (blob.size > 0) fileVoice(blob, actualMime);
       };
       recorder.start();
       setRecording(true);
@@ -177,7 +172,7 @@ export function CaptureBox({ onCaptured }: { onCaptured: () => void }) {
     setRecording(false);
   }
 
-  function stopAndTranscribe() {
+  function stopAndFile() {
     cancelledRef.current = false;
     endTimer();
     recorderRef.current?.stop();
@@ -190,9 +185,9 @@ export function CaptureBox({ onCaptured }: { onCaptured: () => void }) {
     chunksRef.current = [];
   }
 
-  function retryTranscribe() {
+  function retryVoice() {
     const kept = lastAudioRef.current;
-    if (kept) transcribe(kept.blob, kept.mime);
+    if (kept) fileVoice(kept.blob, kept.mime);
   }
 
   async function onPhoto(e: React.ChangeEvent<HTMLInputElement>) {
@@ -227,8 +222,8 @@ export function CaptureBox({ onCaptured }: { onCaptured: () => void }) {
         <div className="mt-3 flex items-center gap-2">
           <span className="inline-flex h-2.5 w-2.5 animate-pulse rounded-full bg-red-500" aria-hidden />
           <span className="text-sm tabular-nums text-muted-foreground">Recording {fmt(seconds)}</span>
-          <Button onClick={stopAndTranscribe} className="ml-auto rounded-full">
-            <Square className="mr-1 h-4 w-4" /> Stop &amp; transcribe
+          <Button onClick={stopAndFile} className="ml-auto rounded-full">
+            <Square className="mr-1 h-4 w-4" /> Stop &amp; remember
           </Button>
           <Button
             type="button"
@@ -244,7 +239,7 @@ export function CaptureBox({ onCaptured }: { onCaptured: () => void }) {
         </div>
       ) : (
         <div className="mt-3 flex flex-wrap items-center gap-2">
-          <Button onClick={remember} disabled={busy || transcribing || !text.trim()} className="rounded-full">
+          <Button onClick={remember} disabled={busy || filing || !text.trim()} className="rounded-full">
             {busy ? <Loader2 className="mr-1 h-4 w-4 animate-spin" /> : null}
             Remember
           </Button>
@@ -254,7 +249,7 @@ export function CaptureBox({ onCaptured }: { onCaptured: () => void }) {
             size="icon"
             className="rounded-full"
             onClick={startRecording}
-            disabled={busy || transcribing}
+            disabled={busy || filing}
             aria-label="Record a voice note"
             title="Record a voice note"
           >
@@ -279,17 +274,17 @@ export function CaptureBox({ onCaptured }: { onCaptured: () => void }) {
         </div>
       )}
 
-      {transcribing && (
+      {filing && (
         <p className="mt-3 flex items-center gap-2 text-sm text-muted-foreground">
-          <Loader2 className="h-4 w-4 animate-spin" /> Transcribing…
+          <Loader2 className="h-4 w-4 animate-spin" /> Remembering your note…
         </p>
       )}
 
-      {voiceError && !transcribing && (
+      {voiceError && !filing && (
         <div className="mt-3 flex items-center gap-2 text-sm text-amber-600">
           <span>{voiceError}</span>
           {lastAudioRef.current && (
-            <Button type="button" variant="outline" size="sm" className="ml-auto rounded-full" onClick={retryTranscribe}>
+            <Button type="button" variant="outline" size="sm" className="ml-auto rounded-full" onClick={retryVoice}>
               <RotateCcw className="mr-1 h-3.5 w-3.5" /> Retry
             </Button>
           )}
@@ -298,35 +293,47 @@ export function CaptureBox({ onCaptured }: { onCaptured: () => void }) {
 
       {error && <p className="mt-3 text-sm text-red-500">{error}</p>}
 
-      {result && (
-        <div className="mt-3 rounded-xl bg-muted/60 p-3 text-sm">
-          {result.landed.length > 0 ? (
-            <p>
-              Filed{" "}
-              <span className="font-medium">
-                {result.landed.map((l) => `${l.person}${l.created ? " (new)" : ""}`).join(", ")}
-              </span>
-              .
+      {result &&
+        (result.queued ? (
+          // Gemini was busy — the note is parked and will file itself. No waiting.
+          <div className="mt-3 rounded-xl bg-muted/60 p-3 text-sm">
+            <p>Gemini&apos;s busy right now — I&apos;ll keep trying in the background.</p>
+            <p className="mt-1 text-muted-foreground">
+              This note will file itself automatically. No need to wait or do anything.
             </p>
-          ) : (
-            <p className="text-muted-foreground">Nothing to file from that one.</p>
-          )}
-          {result.ambiguous.length > 0 && (
-            <ul className="mt-1 text-muted-foreground">
-              {result.ambiguous.map((a, i) => (
-                <li key={i}>
-                  Skipped {a.name}: {a.reason}
-                </li>
-              ))}
-            </ul>
-          )}
-          {result.adapter === "mock" && (
-            <p className="mt-1 text-xs text-muted-foreground">
-              Running in offline mode. Add an Anthropic API key for full AI parsing.
-            </p>
-          )}
-        </div>
-      )}
+          </div>
+        ) : (
+          <div className="mt-3 rounded-xl bg-muted/60 p-3 text-sm">
+            {result.landed.length > 0 ? (
+              <p>
+                Filed{" "}
+                <span className="font-medium">
+                  {result.landed.map((l) => `${l.person}${l.created ? " (new)" : ""}`).join(", ")}
+                </span>
+                .
+              </p>
+            ) : (
+              <p className="text-muted-foreground">Nothing to file from that one.</p>
+            )}
+            {result.transcript && (
+              <p className="mt-1 text-xs text-muted-foreground">Heard: “{result.transcript}”</p>
+            )}
+            {result.ambiguous.length > 0 && (
+              <ul className="mt-1 text-muted-foreground">
+                {result.ambiguous.map((a, i) => (
+                  <li key={i}>
+                    Skipped {a.name}: {a.reason}
+                  </li>
+                ))}
+              </ul>
+            )}
+            {result.adapter === "mock" && (
+              <p className="mt-1 text-xs text-muted-foreground">
+                Running in offline mode. Add an Anthropic API key for full AI parsing.
+              </p>
+            )}
+          </div>
+        ))}
     </div>
   );
 }

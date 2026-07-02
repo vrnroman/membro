@@ -72,4 +72,25 @@ create table if not exists cards (
   created_at text not null
 );
 create index if not exists cards_status_idx on cards (status, created_at desc);
+
+-- Voice notes that couldn't be transcribed+filed inline because Gemini was rate-
+-- limited / overloaded. The background worker drains this: it re-transcribes
+-- (once 'transcript' is filled it never hits Gemini again) then files the note,
+-- backing off between tries. A note is never lost to a passing 429 — it either
+-- lands (row deleted) or ends 'failed' with the audio still here to retry.
+create table if not exists voice_jobs (
+  id              text primary key,
+  audio_base64    text not null,
+  mime_type       text not null,
+  prefix_text     text not null default '',   -- anything typed in the box alongside the recording
+  names           text not null default '[]', -- JSON snapshot of roster names, for spelling hints
+  transcript      text,                        -- filled once Gemini succeeds; then only filing is retried
+  status          text not null default 'queued' check (status in ('queued','done','failed')),
+  attempts        integer not null default 0,
+  next_attempt_at text not null,               -- worker picks the row up once now >= this
+  last_error      text,
+  created_at      text not null,
+  updated_at      text not null
+);
+create index if not exists voice_jobs_due_idx on voice_jobs (status, next_attempt_at);
 `;

@@ -37,6 +37,27 @@ export type TranscribeResult = {
   model: string;
 };
 
+// HTTP statuses worth retrying: Gemini returns 429 (RESOURCE_EXHAUSTED — "too
+// many requests / quota") when it's throttling, and 500/503 ("the model is
+// overloaded") on transient spikes. 408/502/504 are gateway/timeout blips.
+// A 400/401/403 is a bad request or bad key — retrying can't fix that.
+const RETRIABLE_STATUS = new Set([408, 429, 500, 502, 503, 504]);
+
+// Thrown by transcribeAudio so callers can tell a passing storm (retry, or park
+// it for the background worker) from a permanent failure (give up cleanly).
+export class TranscribeError extends Error {
+  /** HTTP status from Gemini, or 0 for a network/DNS error (no response). */
+  readonly status: number;
+  /** True when waiting and trying again is likely to eventually succeed. */
+  readonly retriable: boolean;
+  constructor(message: string, opts: { status: number; retriable: boolean }) {
+    super(message);
+    this.name = "TranscribeError";
+    this.status = opts.status;
+    this.retriable = opts.retriable;
+  }
+}
+
 function buildPrompt(names: string[]): string {
   const lines = [
     "Transcribe this voice memo into clean, readable English text.",
@@ -61,10 +82,10 @@ function buildPrompt(names: string[]): string {
  */
 export async function transcribeAudio(input: TranscribeInput): Promise<TranscribeResult> {
   const key = process.env.GEMINI_API_KEY;
-  if (!key) throw new Error("GEMINI_API_KEY is not set");
+  if (!key) throw new TranscribeError("GEMINI_API_KEY is not set", { status: 0, retriable: false });
   const model = process.env.MEMBRO_GEMINI_MODEL || "gemini-2.5-flash";
 
-  if (!input.audioBase64) throw new Error("no audio");
+  if (!input.audioBase64) throw new TranscribeError("no audio", { status: 0, retriable: false });
 
   // Gemini wants a bare type ("audio/mp4"), not "audio/webm;codecs=opus".
   const mime = (input.mimeType || "audio/mp4").split(";")[0].trim();
@@ -85,19 +106,28 @@ export async function transcribeAudio(input: TranscribeInput): Promise<Transcrib
     generationConfig: { temperature: 0 },
   };
 
-  const res = await fetch(`${GEMINI_ENDPOINT}/${model}:generateContent?key=${key}`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
+  let res: Response;
+  try {
+    res = await fetch(`${GEMINI_ENDPOINT}/${model}:generateContent?key=${key}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+  } catch (e) {
+    // No HTTP response at all (DNS, connection reset, offline) — always worth a retry.
+    throw new TranscribeError(`Gemini request failed: ${(e as Error).message}`, { status: 0, retriable: true });
+  }
 
-  const data = (await res.json()) as {
+  const data = (await res.json().catch(() => ({}))) as {
     error?: { message?: string };
     candidates?: { content?: { parts?: { text?: string }[] } }[];
   };
 
   if (!res.ok) {
-    throw new Error(data?.error?.message || `Gemini transcription failed (HTTP ${res.status})`);
+    throw new TranscribeError(
+      data?.error?.message || `Gemini transcription failed (HTTP ${res.status})`,
+      { status: res.status, retriable: RETRIABLE_STATUS.has(res.status) },
+    );
   }
 
   const text = (data.candidates?.[0]?.content?.parts ?? [])

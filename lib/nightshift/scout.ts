@@ -28,6 +28,22 @@ export const COLD_DAYS = 45;
 export const BIRTHDAY_WINDOW = 30;
 export const MEETING_WINDOW = 7;
 
+// Certainty split, used to route what the Scout finds to the right screen.
+// "Action" signals are grounded in a date the owner set or something they said
+// directly (a meeting, a promise, a birthday) — clear to-dos. "Idea" signals are
+// speculative things the owner may or may not act on (a heuristic intro, a nudge
+// to reconnect) and live on the opt-in Suggestions screen.
+export type ActionSignal = Extract<Signal, { type: "meeting" | "commitment" | "birthday" }>;
+export type IdeaSignal = Extract<Signal, { type: "connector" | "cold" }>;
+
+export function isActionSignal(s: Signal): s is ActionSignal {
+  return s.type === "meeting" || s.type === "commitment" || s.type === "birthday";
+}
+
+export function isIdeaSignal(s: Signal): s is IdeaSignal {
+  return s.type === "connector" || s.type === "cold";
+}
+
 function lite(p: PersonRow): PersonLite {
   return { id: p.id, name: p.name, company: p.company, role: p.role, blurb: p.blurb };
 }

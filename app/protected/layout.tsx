@@ -22,6 +22,9 @@ export default function ProtectedLayout({
               <Link href={"/protected/people"} className="text-muted-foreground hover:text-foreground">
                 People
               </Link>
+              <Link href={"/protected/suggestions"} className="text-muted-foreground hover:text-foreground">
+                Suggestions
+              </Link>
             </div>
             {/* Logout is handled by the auth proxy in front of the app. */}
             <a href="/oauth2/sign_out" className="text-muted-foreground hover:text-foreground">

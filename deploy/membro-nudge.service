@@ -1,0 +1,21 @@
+# Membro morning nudge — oneshot fired by membro-nudge.timer.
+# It just asks the already-running Membro app to compute and (if anything is due
+# today or tomorrow) send today's one-line Telegram nudge. The route is
+# idempotent, so a second fire on the same day is a no-op.
+#
+# Install on the VM: copy to /etc/systemd/system/, `systemctl daemon-reload`.
+[Unit]
+Description=Membro morning nudge (one Telegram line when something is due today or tomorrow)
+After=network-online.target membro.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=tianyuezhou
+# -f: fail (non-zero exit) on an HTTP error so a bad run shows in the journal.
+ExecStart=/usr/bin/curl -fsS -m 30 -X POST http://127.0.0.1:3000/api/nudge
+# Hardening: this unit only needs the loopback network, nothing on disk.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true

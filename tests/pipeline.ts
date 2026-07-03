@@ -2,6 +2,7 @@
 // build cards, all on the deterministic mock. Run with: npm test
 import { MockAdapter } from "@/lib/ai/mock";
 import { scout, horizon, isActionSignal, PersonRow, FactRow } from "@/lib/nightshift/scout";
+import { dueNudges, formatNudge } from "@/lib/nightshift/nudge";
 
 const TODAY = "2026-06-27";
 
@@ -132,6 +133,31 @@ async function main() {
   ];
   const selfFacts: FactRow[] = [{ id: "sf1", person_id: "self", kind: "commitment", content: "meditate", due_at: null, status: "open" }];
   check("self row yields no signals", scout(selfPeople, selfFacts, TODAY).length === 0);
+
+  // 9. Morning nudge: only what's due today or tomorrow, most urgent first,
+  //    rendered as one flat message. Overdue / undated / far-out are left out.
+  const nudgePeople: PersonRow[] = [
+    { id: "n1", name: "Alice", company: null, role: null, blurb: null, birthday: "1990-06-27", next_meeting_at: null, last_contact_at: `${TODAY}T12:00:00Z` }, // birthday today
+    { id: "n2", name: "Bob", company: null, role: null, blurb: null, birthday: null, next_meeting_at: `${addDays(TODAY, 1)}T09:00:00Z`, last_contact_at: `${TODAY}T12:00:00Z` }, // meeting tomorrow
+    { id: "n3", name: "Cara", company: null, role: null, blurb: null, birthday: null, next_meeting_at: null, last_contact_at: `${TODAY}T12:00:00Z` },
+    { id: "n4", name: "Deb", company: null, role: null, blurb: null, birthday: null, next_meeting_at: null, last_contact_at: `${TODAY}T12:00:00Z` },
+  ];
+  const nudgeFacts: FactRow[] = [
+    { id: "nf1", person_id: "n3", kind: "commitment", content: "send the deck", due_at: `${TODAY}T09:00:00Z`, status: "open" }, // due today
+    { id: "nf2", person_id: "n3", kind: "commitment", content: "call the vendor", due_at: `${addDays(TODAY, -2)}T09:00:00Z`, status: "open" }, // overdue -> excluded
+    { id: "nf3", person_id: "n3", kind: "commitment", content: "review the doc", due_at: null, status: "open" }, // undated -> excluded
+    { id: "nf4", person_id: "n4", kind: "date", content: "Product launch", due_at: `${addDays(TODAY, 1)}T09:00:00Z`, status: "open" }, // tomorrow
+    { id: "nf5", person_id: "n4", kind: "date", content: "Offsite in Lisbon", due_at: `${addDays(TODAY, 40)}T09:00:00Z`, status: "open" }, // far -> excluded
+  ];
+  const nudges = dueNudges(nudgePeople, nudgeFacts, TODAY);
+  check("nudge picks exactly the 4 due-today/tomorrow items", nudges.length === 4, `got ${nudges.length}: ${nudges.map((n) => n.text).join(" | ")}`);
+  check("nudge order is today-first then most-urgent type", nudges.map((n) => n.type).join(",") === "commitment,birthday,meeting,dated", `got ${nudges.map((n) => `${n.type}:${n.daysUntil}`).join(",")}`);
+  const msg = formatNudge(nudges);
+  check("nudge message names the promised person and day", !!msg && msg.includes("You promised Cara: send the deck (due today).") && msg.includes("Alice's birthday today.") && msg.includes("You meet Bob tomorrow.") && msg.includes("Product launch tomorrow."), `msg=${msg}`);
+  check("nudge message drops overdue / undated / far items", !!msg && !msg.includes("call the vendor") && !msg.includes("review the doc") && !msg.includes("Lisbon"), `msg=${msg}`);
+  check("nudge message is one line, no wrapper/preamble", !!msg && !msg.includes("\n") && !/^(reminder|nudge|membro|good morning)/i.test(msg), `msg=${msg}`);
+  check("nudge message has no em/en dash", !!msg && !/[—–]/.test(msg), `msg=${msg}`);
+  check("nothing due -> no message (silence)", formatNudge(dueNudges([], [], TODAY)) === null);
 
   console.log("");
   if (failures) {

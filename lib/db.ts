@@ -142,4 +142,13 @@ create table if not exists assist_jobs (
   updated_at      text not null
 );
 create index if not exists assist_jobs_due_idx on assist_jobs (status, next_attempt_at);
+
+-- Tiny key/value store for small bits of durable app state that don't warrant a
+-- table. Today it holds 'last_nudge_date' so the morning Telegram nudge is
+-- idempotent: a second fire on the same local date is a no-op.
+create table if not exists kv (
+  key        text primary key,
+  value      text not null,
+  updated_at text not null
+);
 `;

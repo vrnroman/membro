@@ -289,6 +289,21 @@ export function countPendingAssists(): number {
   return (db().prepare("select count(*) as n from assists where status = 'pending'").get() as { n: number }).n;
 }
 
+// ── KV (small durable app state) ──────────────────────────────────────────────
+export function getKv(key: string): string | null {
+  const row = db().prepare("select value from kv where key = ?").get(key) as { value: string } | undefined;
+  return row?.value ?? null;
+}
+
+export function setKv(key: string, value: string): void {
+  db()
+    .prepare(
+      `insert into kv (key, value, updated_at) values (?, ?, ?)
+       on conflict(key) do update set value = excluded.value, updated_at = excluded.updated_at`,
+    )
+    .run(key, value, now());
+}
+
 // ── Diary (the owner's own thread on the reserved self row) ───────────────────
 export function getOrCreateSelf(): { id: string; name: string } {
   const existing = db().prepare("select id, name from people where id = ?").get(SELF_ID) as

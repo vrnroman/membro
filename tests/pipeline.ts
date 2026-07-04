@@ -160,6 +160,52 @@ async function main() {
   check("nothing due + silent -> no message", formatNudge(dueNudges([], [], TODAY)) === null);
   check("nothing due + notifyWhenEmpty -> all-clear line", formatNudge(dueNudges([], [], TODAY), { notifyWhenEmpty: true }) === "Nothing due today or tomorrow.");
 
+  // 10. Nudge hardening: timezone boundary, unparseable dates, length cap, and
+  //     content sanitizing. (Owner TZ defaults to Asia/Singapore, UTC+8.)
+  const tzPeople: PersonRow[] = [
+    { id: "t1", name: "Evening", company: null, role: null, blurb: null, birthday: null, next_meeting_at: null, last_contact_at: `${TODAY}T12:00:00Z` },
+  ];
+  // 20:00 UTC on TODAY is 04:00 the NEXT day in Singapore -> genuinely tomorrow.
+  const tzFacts: FactRow[] = [
+    { id: "tf1", person_id: "t1", kind: "date", content: "Evening deadline", due_at: `${TODAY}T20:00:00Z`, status: "open" },
+  ];
+  const tzNudges = dueNudges(tzPeople, tzFacts, TODAY);
+  check("late-UTC event is bucketed on the owner's day (tomorrow, not today)", tzNudges.length === 1 && tzNudges[0].daysUntil === 1 && tzNudges[0].text === "Evening deadline tomorrow.", `got ${JSON.stringify(tzNudges)}`);
+
+  // Unparseable / malformed due dates must be excluded, never crash or mislabel.
+  const badFacts: FactRow[] = [
+    { id: "bf1", person_id: "t1", kind: "date", content: "Broken date", due_at: "not-a-date", status: "open" },
+    { id: "bf2", person_id: "t1", kind: "commitment", content: "unpadded", due_at: "2026-7-4", status: "open" },
+  ];
+  let threw = false;
+  let badNudges: ReturnType<typeof dueNudges> = [];
+  try {
+    badNudges = dueNudges(tzPeople, badFacts, TODAY);
+  } catch {
+    threw = true;
+  }
+  check("malformed due dates are excluded, not a crash", !threw && badNudges.length === 0, `threw=${threw} got ${JSON.stringify(badNudges)}`);
+
+  // A fact typed across multiple lines stays one bullet on one line.
+  const nlFacts: FactRow[] = [
+    { id: "nl1", person_id: "t1", kind: "commitment", content: "send the deck\nand the signed contract", due_at: `${TODAY}T02:00:00Z`, status: "open" },
+  ];
+  const nlMsg = formatNudge(dueNudges(tzPeople, nlFacts, TODAY));
+  check("a newline in a fact does not break the one-bullet-per-line layout", !!nlMsg && nlMsg.split("\n").length === 1 && nlMsg.startsWith("• ") && nlMsg.includes("send the deck and the signed contract"), `msg=${JSON.stringify(nlMsg)}`);
+
+  // Content ending in punctuation must not double the terminal period.
+  const punctFacts: FactRow[] = [
+    { id: "pf1", person_id: "t1", kind: "date", content: "Product launch.", due_at: `${TODAY}T02:00:00Z`, status: "open" },
+  ];
+  const punctMsg = formatNudge(dueNudges(tzPeople, punctFacts, TODAY));
+  check("trailing punctuation is not doubled", punctMsg === "• Product launch today.", `msg=${JSON.stringify(punctMsg)}`);
+
+  // Many due items must stay under Telegram's 4096-char limit with a "+N more".
+  const many = Array.from({ length: 300 }, (_, i) => ({ type: "birthday" as const, daysUntil: 0 as const, text: `Person Number ${i} has a birthday today.` }));
+  const capped = formatNudge(many)!;
+  check("a huge nudge is capped under Telegram's 4096 limit", capped.length <= 4096, `len=${capped.length}`);
+  check("a capped nudge summarizes the remainder as (+N more)", /\(\+\d+ more\)$/.test(capped), `tail=${JSON.stringify(capped.slice(-40))}`);
+
   console.log("");
   if (failures) {
     console.log(`${failures} check(s) FAILED`);

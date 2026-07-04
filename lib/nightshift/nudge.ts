@@ -25,6 +25,13 @@ function labelDays(label: string | null): 0 | 1 | null {
 
 const whenWord = (d: 0 | 1) => (d === 0 ? "today" : "tomorrow");
 
+// Flatten any interior newline/whitespace and trim, so one item is always one
+// line (a fact typed across multiple lines must not break the bulleted layout).
+const clean = (s: string) => s.replace(/\s+/g, " ").trim();
+// Drop trailing sentence punctuation so appending " today." / " (due today)."
+// never doubles a period.
+const stripEnd = (s: string) => clean(s).replace(/[.!?]+$/, "").trim();
+
 // Turn one due action signal into its flat clause. The person's name carries the
 // warmth (a promise, a birthday read human); deadlines stay purely functional.
 // No wrapper, no label prefix, no exclamation: written the way the owner would.
@@ -32,13 +39,13 @@ function clauseFor(s: ActionSignal, d: 0 | 1): string {
   const when = whenWord(d);
   switch (s.type) {
     case "birthday":
-      return `${s.person.name}'s birthday ${when}.`;
+      return `${clean(s.person.name)}'s birthday ${when}.`;
     case "meeting":
-      return `You meet ${s.person.name} ${when}.`;
+      return `You meet ${clean(s.person.name)} ${when}.`;
     case "dated":
-      return `${s.event} ${when}.`;
+      return `${stripEnd(s.event) || "A dated event"} ${when}.`;
     case "commitment":
-      return `You promised ${s.person.name}: ${s.commitment} (due ${when}).`;
+      return `You promised ${clean(s.person.name)}: ${stripEnd(s.commitment) || "(unspecified)"} (due ${when}).`;
   }
 }
 
@@ -88,11 +95,34 @@ export function dueNudges(people: PersonRow[], facts: FactRow[], today: string):
 // MEMBRO_NUDGE_SILENT_WHEN_EMPTY=1 to go silent on empty days instead.
 export const ALL_CLEAR = "Nothing due today or tomorrow.";
 
+// Telegram rejects a sendMessage body over 4096 characters. Stay under that with
+// headroom; if a rare busy day overflows, keep the most urgent bullets that fit
+// and summarize the rest as one "(+N more)" line rather than failing the whole
+// send (which, being recorded only on success, would otherwise recur every day).
+const TELEGRAM_LIMIT = 4096;
+const SAFE_LIMIT = 3900;
+
 // The one message. Each due item is its own bullet on its own line (easier to
-// scan than a run-on line), most urgent first, nothing dropped, no header or
-// sign-off. With nothing due, returns the all-clear line when notifyWhenEmpty is
-// set, otherwise null so the caller sends nothing at all.
+// scan than a run-on line), most urgent first, no header or sign-off. With
+// nothing due, returns the all-clear line when notifyWhenEmpty is set, otherwise
+// null so the caller sends nothing at all.
 export function formatNudge(items: NudgeItem[], opts: { notifyWhenEmpty?: boolean } = {}): string | null {
   if (items.length === 0) return opts.notifyWhenEmpty ? ALL_CLEAR : null;
-  return items.map((i) => `• ${i.text}`).join("\n");
+
+  const bullets = items.map((i) => `• ${i.text}`);
+  const kept: string[] = [];
+  for (let i = 0; i < bullets.length; i++) {
+    const remaining = bullets.length - (i + 1);
+    const tail = remaining > 0 ? `\n• (+${remaining} more)` : "";
+    const projected = [...kept, bullets[i]].join("\n").length + tail.length;
+    if (projected > SAFE_LIMIT && kept.length > 0) {
+      kept.push(`• (+${bullets.length - i} more)`);
+      return kept.join("\n");
+    }
+    kept.push(bullets[i]);
+  }
+
+  const msg = kept.join("\n");
+  // Safety net for a single pathological bullet that alone exceeds the hard limit.
+  return msg.length > TELEGRAM_LIMIT ? msg.slice(0, TELEGRAM_LIMIT - 3) + "..." : msg;
 }

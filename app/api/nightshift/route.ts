@@ -3,6 +3,7 @@ import { listPeople, listFacts, deletePendingCards, insertCards } from "@/lib/re
 import { getAdapter } from "@/lib/ai";
 import { scout, isIdeaSignal } from "@/lib/nightshift/scout";
 import { Signal } from "@/lib/ai/types";
+import { localToday } from "@/lib/today";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -23,7 +24,7 @@ export async function POST() {
   const people = listPeople();
   const facts = listFacts();
 
-  const today = new Date().toISOString().slice(0, 10);
+  const today = localToday();
   // The night shift only drafts the speculative outreach (intros, reconnects).
   // Certain items (commitments, meetings, birthdays, dated events) are handled
   // as Action items on Today, so drafting them here would just duplicate them.

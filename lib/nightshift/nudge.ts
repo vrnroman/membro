@@ -83,11 +83,16 @@ export function dueNudges(people: PersonRow[], facts: FactRow[], today: string):
   return items.sort((a, b) => a.daysUntil - b.daysUntil || TYPE_ORDER[a.type] - TYPE_ORDER[b.type]);
 }
 
-// The one message. Each due item is its own flat clause; nothing is dropped and
-// there is no header or sign-off (the "Membro" bot name is the only framing).
-// Returns null when nothing is due, so the caller sends nothing at all: silence
-// is the default, one moment only when it matters.
-export function formatNudge(items: NudgeItem[]): string | null {
-  if (items.length === 0) return null;
-  return items.map((i) => i.text).join(" ");
+// The all-clear line sent on a quiet day, so the owner can see the once-a-day
+// service is still alive. Sent by default; once the nudge has earned trust, set
+// MEMBRO_NUDGE_SILENT_WHEN_EMPTY=1 to go silent on empty days instead.
+export const ALL_CLEAR = "Nothing due today or tomorrow.";
+
+// The one message. Each due item is its own bullet on its own line (easier to
+// scan than a run-on line), most urgent first, nothing dropped, no header or
+// sign-off. With nothing due, returns the all-clear line when notifyWhenEmpty is
+// set, otherwise null so the caller sends nothing at all.
+export function formatNudge(items: NudgeItem[], opts: { notifyWhenEmpty?: boolean } = {}): string | null {
+  if (items.length === 0) return opts.notifyWhenEmpty ? ALL_CLEAR : null;
+  return items.map((i) => `• ${i.text}`).join("\n");
 }

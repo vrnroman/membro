@@ -15,13 +15,15 @@ export const maxDuration = 30;
 
 const LAST_SENT_KEY = "last_nudge_date";
 
-// The local calendar date the timer fires on (YYYY-MM-DD), in the VM's own
-// timezone. The Scout compares by calendar date, so "due today/tomorrow" is
-// judged against the same day the owner is living, not UTC.
+// The owner's local calendar date (YYYY-MM-DD). The VM runs UTC but the owner is
+// in another timezone, so "due today/tomorrow" must be judged against the owner's
+// day, not UTC. This matters because the timer fires at 22:00 UTC (06:00 the
+// owner's morning), which is already "tomorrow" for the owner but still today in
+// UTC. MEMBRO_NUDGE_TZ overrides the default (an IANA zone name).
 function localToday(): string {
-  const d = new Date();
-  const p = (n: number) => String(n).padStart(2, "0");
-  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+  const tz = process.env.MEMBRO_NUDGE_TZ || "Asia/Singapore";
+  // en-CA renders as YYYY-MM-DD, the format the Scout compares by.
+  return new Intl.DateTimeFormat("en-CA", { timeZone: tz, year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date());
 }
 
 export async function POST(req: Request) {
@@ -31,9 +33,13 @@ export async function POST(req: Request) {
 
   const today = localToday();
   const items = dueNudges(listPeople(), listFacts(), today);
-  const message = formatNudge(items);
+  // Quiet days still send an all-clear by default, so the once-a-day nudge
+  // visibly stays alive; set MEMBRO_NUDGE_SILENT_WHEN_EMPTY=1 to go silent on
+  // empty days once it has earned trust.
+  const notifyWhenEmpty = process.env.MEMBRO_NUDGE_SILENT_WHEN_EMPTY !== "1";
+  const message = formatNudge(items, { notifyWhenEmpty });
 
-  // Silence is the default: nothing due today or tomorrow means no message at all.
+  // Only reached when silent-on-empty is on AND nothing is due: send nothing.
   if (!message) {
     return NextResponse.json({ sent: false, reason: "nothing-due", today, count: 0 });
   }

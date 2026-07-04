@@ -155,9 +155,10 @@ async function main() {
   const msg = formatNudge(nudges);
   check("nudge message names the promised person and day", !!msg && msg.includes("You promised Cara: send the deck (due today).") && msg.includes("Alice's birthday today.") && msg.includes("You meet Bob tomorrow.") && msg.includes("Product launch tomorrow."), `msg=${msg}`);
   check("nudge message drops overdue / undated / far items", !!msg && !msg.includes("call the vendor") && !msg.includes("review the doc") && !msg.includes("Lisbon"), `msg=${msg}`);
-  check("nudge message is one line, no wrapper/preamble", !!msg && !msg.includes("\n") && !/^(reminder|nudge|membro|good morning)/i.test(msg), `msg=${msg}`);
+  check("nudge message is one bullet per line, no wrapper/preamble", !!msg && msg.split("\n").length === nudges.length && msg.split("\n").every((l) => l.startsWith("• ")) && !/^(reminder|nudge|membro|good morning)/i.test(msg), `msg=${JSON.stringify(msg)}`);
   check("nudge message has no em/en dash", !!msg && !/[—–]/.test(msg), `msg=${msg}`);
-  check("nothing due -> no message (silence)", formatNudge(dueNudges([], [], TODAY)) === null);
+  check("nothing due + silent -> no message", formatNudge(dueNudges([], [], TODAY)) === null);
+  check("nothing due + notifyWhenEmpty -> all-clear line", formatNudge(dueNudges([], [], TODAY), { notifyWhenEmpty: true }) === "Nothing due today or tomorrow.");
 
   console.log("");
   if (failures) {

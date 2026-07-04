@@ -117,12 +117,13 @@ export function formatNudge(items: NudgeItem[], opts: { notifyWhenEmpty?: boolea
     const projected = [...kept, bullets[i]].join("\n").length + tail.length;
     if (projected > SAFE_LIMIT && kept.length > 0) {
       kept.push(`• (+${bullets.length - i} more)`);
-      return kept.join("\n");
+      break; // fall through to the hard-limit safety net below, not an early return
     }
     kept.push(bullets[i]);
   }
 
   const msg = kept.join("\n");
-  // Safety net for a single pathological bullet that alone exceeds the hard limit.
+  // Hard safety net covering every path (incl. a single pathological bullet that
+  // alone exceeds the limit): the returned message is never over 4096.
   return msg.length > TELEGRAM_LIMIT ? msg.slice(0, TELEGRAM_LIMIT - 3) + "..." : msg;
 }

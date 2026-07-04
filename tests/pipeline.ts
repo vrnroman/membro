@@ -3,6 +3,7 @@
 import { MockAdapter } from "@/lib/ai/mock";
 import { scout, horizon, isActionSignal, PersonRow, FactRow } from "@/lib/nightshift/scout";
 import { dueNudges, formatNudge } from "@/lib/nightshift/nudge";
+import { isoToLocalDate } from "@/lib/today";
 
 const TODAY = "2026-06-27";
 
@@ -175,7 +176,7 @@ async function main() {
   // Unparseable / malformed due dates must be excluded, never crash or mislabel.
   const badFacts: FactRow[] = [
     { id: "bf1", person_id: "t1", kind: "date", content: "Broken date", due_at: "not-a-date", status: "open" },
-    { id: "bf2", person_id: "t1", kind: "commitment", content: "unpadded", due_at: "2026-7-4", status: "open" },
+    { id: "bf2", person_id: "t1", kind: "commitment", content: "unresolved", due_at: "next Thursday", status: "open" },
   ];
   let threw = false;
   let badNudges: ReturnType<typeof dueNudges> = [];
@@ -205,6 +206,19 @@ async function main() {
   const capped = formatNudge(many)!;
   check("a huge nudge is capped under Telegram's 4096 limit", capped.length <= 4096, `len=${capped.length}`);
   check("a capped nudge summarizes the remainder as (+N more)", /\(\+\d+ more\)$/.test(capped), `tail=${JSON.stringify(capped.slice(-40))}`);
+  // A single oversized first bullet, plus more items, must still cap under 4096.
+  const bigFirst = formatNudge([
+    { type: "commitment" as const, daysUntil: 0 as const, text: "x".repeat(4090) },
+    { type: "birthday" as const, daysUntil: 0 as const, text: "Alice's birthday today." },
+    { type: "birthday" as const, daysUntil: 0 as const, text: "Bob's birthday today." },
+  ])!;
+  check("an oversized first bullet is still capped under 4096", bigFirst.length <= 4096, `len=${bigFirst.length}`);
+
+  // isoToLocalDate: a bare owner-local date must not be shifted through UTC (a
+  // west-of-UTC MEMBRO_TZ would otherwise roll it back a day).
+  check("bare owner-local date is not shifted by timezone", isoToLocalDate("2026-07-04", "America/New_York") === "2026-07-04" && isoToLocalDate("2026-07-04", "Asia/Singapore") === "2026-07-04", `NY=${isoToLocalDate("2026-07-04", "America/New_York")}`);
+  // A real instant IS reduced in the given zone.
+  check("an evening-UTC instant reduces to the owner's next day", isoToLocalDate("2026-07-04T20:00:00Z", "Asia/Singapore") === "2026-07-05", `got ${isoToLocalDate("2026-07-04T20:00:00Z", "Asia/Singapore")}`);
 
   console.log("");
   if (failures) {

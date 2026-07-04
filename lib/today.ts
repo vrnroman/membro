@@ -47,6 +47,10 @@ export function localToday(tz: string = ownerTz()): string {
 // be parsed. Using the full instant (not a UTC substring) means an evening event
 // is bucketed on the day the owner actually experiences it.
 export function isoToLocalDate(iso: string, tz: string = ownerTz()): string | null {
+  // A bare calendar date ("YYYY-MM-DD") is ALREADY an owner-local day (that is how
+  // callers pass "today"). Return it as-is: routing it through Date.parse would
+  // read it as UTC midnight and roll it back a day in a west-of-UTC zone.
+  if (/^\d{4}-\d{2}-\d{2}$/.test(iso)) return iso;
   const ms = Date.parse(iso);
   if (Number.isNaN(ms)) return null;
   return fmt(tz).format(new Date(ms));

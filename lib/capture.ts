@@ -8,6 +8,7 @@ import {
 import { getAdapter } from "@/lib/ai";
 import { ExtractedEntity } from "@/lib/ai/types";
 import { enqueueAssistJob } from "@/lib/assist/queue";
+import { localToday } from "@/lib/today";
 
 // The capture core: turn a note (typed, transcribed voice, or a photo) into
 // people + facts on file. Lives here — not in the route — so the /api/capture
@@ -60,7 +61,7 @@ function normalizeBirthday(value: string | null | undefined, today: string): str
 export async function fileNote(input: CaptureInput): Promise<CaptureResult> {
   const { text = "", sourceType = "text", imageBase64, imageMediaType } = input;
 
-  const today = new Date().toISOString().slice(0, 10);
+  const today = localToday();
   const adapter = getAdapter();
 
   const people: PersonName[] = listPeopleIdName();

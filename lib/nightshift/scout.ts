@@ -1,4 +1,5 @@
 import type { PersonLite, Signal } from "@/lib/ai/types";
+import { isoToLocalDate, ownerTz } from "@/lib/today";
 
 // The Scout is pure, deterministic business logic — no AI. It scans the owner's
 // people and facts and surfaces what is "ripe" enough to deserve a finished
@@ -54,10 +55,17 @@ function lite(p: PersonRow): PersonLite {
   return { id: p.id, name: p.name, company: p.company, role: p.role, blurb: p.blurb };
 }
 
+// Whole-day distance between two instants, measured in the owner's timezone.
+// Reducing each instant to its owner-local calendar date (not a raw UTC
+// substring) means an evening event is counted on the day the owner lives it, in
+// step with the owner-local "today" the callers pass in. Returns NaN for an
+// unparseable date so a malformed due_at is excluded, never mislabeled.
 function dayDiff(fromISO: string, toISO: string): number {
-  const a = Date.parse(fromISO.slice(0, 10) + "T00:00:00Z");
-  const b = Date.parse(toISO.slice(0, 10) + "T00:00:00Z");
-  return Math.round((b - a) / 86400000);
+  const tz = ownerTz();
+  const a = isoToLocalDate(fromISO, tz);
+  const b = isoToLocalDate(toISO, tz);
+  if (a === null || b === null) return NaN;
+  return Math.round((Date.parse(b + "T00:00:00Z") - Date.parse(a + "T00:00:00Z")) / 86400000);
 }
 
 // Days until the next anniversary of a birthday (ignores the stored year).
@@ -94,6 +102,7 @@ function topics(p: PersonRow, facts: FactRow[]): Set<string> {
 
 function meetingLabel(today: string, whenISO: string): string {
   const d = dayDiff(today, whenISO);
+  if (Number.isNaN(d)) return "unknown"; // unparseable due_at: never emit "in NaN days"
   if (d < 0) return "overdue";
   if (d === 0) return "today";
   if (d === 1) return "tomorrow";

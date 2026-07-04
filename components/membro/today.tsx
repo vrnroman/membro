@@ -12,6 +12,7 @@ export function Today() {
   const [people, setPeople] = useState<PersonRow[]>([]);
   const [facts, setFacts] = useState<FactRow[]>([]);
   const [assists, setAssists] = useState<Assist[]>([]);
+  const [today, setToday] = useState("");
   const [loading, setLoading] = useState(true);
 
   const load = useCallback(async () => {
@@ -21,6 +22,7 @@ export function Today() {
       setPeople((data.people ?? []) as PersonRow[]);
       setFacts((data.facts ?? []) as FactRow[]);
       setAssists((data.assists ?? []) as Assist[]);
+      setToday((data.today ?? "") as string);
     } finally {
       setLoading(false);
     }
@@ -30,7 +32,6 @@ export function Today() {
     load();
   }, [load]);
 
-  const today = new Date().toISOString().slice(0, 10);
   const pendingAssists = assists.filter((a) => a.status === "pending").length;
   // facts come newest-first from the snapshot, so the first self fact is the latest.
   const latestDiary = facts.find((f) => f.person_id === SELF_ID)?.content ?? null;
@@ -39,7 +40,9 @@ export function Today() {
   return (
     <div className="flex flex-col gap-8">
       <p className="-mt-2 text-sm text-muted-foreground">
-        {new Date().toLocaleDateString(undefined, { weekday: "long", month: "long", day: "numeric" })}
+        {today
+          ? new Date(today + "T12:00:00Z").toLocaleDateString(undefined, { weekday: "long", month: "long", day: "numeric", timeZone: "UTC" })
+          : ""}
       </p>
       <CaptureBox onCaptured={load} />
 
@@ -74,7 +77,7 @@ export function Today() {
         {loading ? (
           <p className="text-sm text-muted-foreground">Loading…</p>
         ) : (
-          <ActionItems people={people} facts={facts} onChange={load} />
+          <ActionItems people={people} facts={facts} today={today} onChange={load} />
         )}
       </section>
 

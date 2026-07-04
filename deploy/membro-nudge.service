@@ -1,19 +1,27 @@
 # Membro morning nudge — oneshot fired by membro-nudge.timer.
-# It just asks the already-running Membro app to compute and (if anything is due
-# today or tomorrow) send today's one-line Telegram nudge. The route is
-# idempotent, so a second fire on the same day is a no-op.
+# It asks the already-running Membro app to compute and (if anything is due today
+# or tomorrow, or the daily all-clear is on) send today's Telegram nudge. The
+# route is idempotent, so a second fire on the same day is a no-op.
+#
+# curl flags:
+#   --retry 2 --retry-delay 5 --retry-connrefused  retry a transient failure or
+#     the app still warming up at boot, so one blip does not lose the whole day.
+#   -m 60  per-attempt cap, safely above the route's worst-case send+retry time.
+#   -o /dev/null  discard the response body (it contains private names) from the
+#     journal; -w logs just the status code so a failure is still visible.
+#   (no -f: an app-level 502 is surfaced by the logged code + the reason in
+#    membro.service's own journal, while a real connection failure still errors.)
 #
 # Install on the VM: copy to /etc/systemd/system/, `systemctl daemon-reload`.
 [Unit]
-Description=Membro morning nudge (one Telegram line when something is due today or tomorrow)
+Description=Membro morning nudge (one Telegram message when something is due today or tomorrow)
 After=network-online.target membro.service
 Wants=network-online.target
 
 [Service]
 Type=oneshot
 User=tianyuezhou
-# -f: fail (non-zero exit) on an HTTP error so a bad run shows in the journal.
-ExecStart=/usr/bin/curl -fsS -m 30 -X POST http://127.0.0.1:3000/api/nudge
+ExecStart=/usr/bin/curl -sS -m 60 --retry 2 --retry-delay 5 --retry-connrefused -o /dev/null -w "membro-nudge HTTP %%{http_code}\n" -X POST http://127.0.0.1:3000/api/nudge
 # Hardening: this unit only needs the loopback network, nothing on disk.
 NoNewPrivileges=true
 ProtectSystem=strict

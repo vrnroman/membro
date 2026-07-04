@@ -21,16 +21,18 @@ function dueTone(label: string | null): string {
 export function ActionItems({
   people,
   facts,
+  today,
   onChange,
 }: {
   people: PersonRow[];
   facts: FactRow[];
+  today: string;
   onChange: () => void;
 }) {
-  const today = new Date().toISOString().slice(0, 10);
   // Generous limit, then keep only the certain signals — this is the whole
-  // to-do list, not a top-N teaser.
-  const items = scout(people, facts, today, 100).filter(isActionSignal);
+  // to-do list, not a top-N teaser. `today` is the owner-local date from the
+  // snapshot, so this list agrees with its own header and the Telegram nudge.
+  const items = today ? scout(people, facts, today, 100).filter(isActionSignal) : [];
   const [saving, setSaving] = useState<string | null>(null);
 
   async function markDone(factId: string) {

@@ -1,6 +1,7 @@
-# Fires the Membro morning nudge once a day. The VM runs on UTC, so 00:00 UTC is
-# 08:00 in the owner's timezone (Asia/Singapore, UTC+8). Firing at 00:00 UTC also
-# keeps the "due today/tomorrow" calendar day in step with the owner's local day.
+# Fires the Membro morning nudge once a day. The VM runs on UTC, so 22:00 UTC is
+# 06:00 the next morning in the owner's timezone (Asia/Singapore, UTC+8), before
+# the owner wakes. The route computes "due today/tomorrow" in the owner's
+# timezone, so firing before UTC midnight does not shift the day.
 # To move the delivery time, change OnCalendar (in UTC) and reinstall.
 # Persistent=true: if the VM was off at fire time, the nudge runs once when it
 # next comes up (and the route's same-day guard stops any double-send).
@@ -8,11 +9,11 @@
 # Install on the VM: copy to /etc/systemd/system/, then
 #   systemctl daemon-reload && systemctl enable --now membro-nudge.timer
 [Unit]
-Description=Fire the Membro morning nudge daily (00:00 UTC = 08:00 Asia/Singapore)
+Description=Fire the Membro morning nudge daily (22:00 UTC = 06:00 Asia/Singapore)
 
 [Timer]
-OnCalendar=*-*-* 00:00:00
-RandomizedDelaySec=180
+OnCalendar=*-*-* 22:00:00
+RandomizedDelaySec=120
 Persistent=true
 
 [Install]

@@ -57,3 +57,5 @@ next-env.d.ts
 
 # Private planning / status doc — kept local, never published
 /ROADMAP.md
+# Private feature roadmap folder (the people-layer briefs) — kept local, never published
+/roadmap/

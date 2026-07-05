@@ -23,12 +23,25 @@ export type FactRow = {
   content: string;
   due_at: string | null;
   status: "open" | "done";
+  created_at: string; // when we filed it — the raw signal for contact cadence
 };
 
 export const COLD_DAYS = 45;
 export const BIRTHDAY_WINDOW = 30;
 export const MEETING_WINDOW = 7;
 export const DATED_WINDOW = 30; // a one-off dated event this close is an action item
+
+// Warm-Keeper: judge cooling against each person's OWN contact rhythm instead of
+// one flat number, so a friend you usually talk to weekly, gone quiet for a
+// month, is caught while a yearly contact at 45 days is left alone. Below
+// MIN_CONTACT_DAYS distinct contact days we can't read a rhythm and fall back to
+// the flat COLD_DAYS backstop. With enough history a person is "cooling" once
+// they have been silent for their median gap stretched by COOLING_FACTOR, but
+// never before MIN_COOLING_DAYS (so a near-daily contact is not nagged after a
+// two-day gap). These are deliberately one-line tunable.
+export const MIN_CONTACT_DAYS = 3;
+export const COOLING_FACTOR = 2;
+export const MIN_COOLING_DAYS = 14;
 
 // The owner's own diary thread lives on a reserved "person" row so it reuses the
 // people/facts storage. It is never a relationship: the Scout skips it, and the
@@ -66,6 +79,49 @@ function dayDiff(fromISO: string, toISO: string): number {
   const b = isoToLocalDate(toISO, tz);
   if (a === null || b === null) return NaN;
   return Math.round((Date.parse(b + "T00:00:00Z") - Date.parse(a + "T00:00:00Z")) / 86400000);
+}
+
+// The distinct owner-local calendar days on which we filed something about a
+// person, oldest first. Several facts from one capture share a day, so a day
+// counts as one "contact" no matter how many facts it produced — this is what
+// keeps a single chatty note from reading as a burst of contact.
+function contactDays(factCreatedAt: string[], tz: string): string[] {
+  const days = new Set<string>();
+  for (const iso of factCreatedAt) {
+    const d = isoToLocalDate(iso, tz);
+    if (d) days.add(d);
+  }
+  return [...days].sort();
+}
+
+// A person's own "how often do we talk" baseline: the median whole-day gap
+// between their consecutive contact days, or null when there is too little
+// history (< MIN_CONTACT_DAYS distinct days) to trust a rhythm. The median (not
+// the mean) shrugs off one unusually long or short gap. Reused in three places:
+// Warm-Keeper cooling detection, the morning nudge, and the Pre-Read rhythm read.
+export function contactCadenceDays(factCreatedAt: string[], tz: string = ownerTz()): number | null {
+  const days = contactDays(factCreatedAt, tz);
+  if (days.length < MIN_CONTACT_DAYS) return null;
+  const gaps: number[] = [];
+  for (let i = 1; i < days.length; i++) {
+    gaps.push(Math.round((Date.parse(days[i] + "T00:00:00Z") - Date.parse(days[i - 1] + "T00:00:00Z")) / 86400000));
+  }
+  gaps.sort((a, b) => a - b);
+  const mid = Math.floor(gaps.length / 2);
+  // Use the lower-middle order statistic, never the AVERAGE of the two middles, so
+  // one long lapse can't inflate the rhythm: a weekly friend with gaps [7, 180]
+  // reads 7, not ~94 (which would never flag them as cooling). Always a real
+  // observed gap, which is what "how often do we usually talk" should mean.
+  const median = gaps.length % 2 ? gaps[mid] : gaps[mid - 1];
+  return Math.max(1, median);
+}
+
+// How many quiet days make a person "cooling": their cadence stretched by
+// COOLING_FACTOR (floored at MIN_COOLING_DAYS so a daily contact is not nagged
+// after a short gap), or the flat COLD_DAYS backstop when we can't read a rhythm.
+export function coolingThreshold(cadence: number | null): number {
+  if (cadence === null) return COLD_DAYS;
+  return Math.max(MIN_COOLING_DAYS, Math.round(cadence * COOLING_FACTOR));
 }
 
 // Days until the next anniversary of a birthday (ignores the stored year).
@@ -208,12 +264,24 @@ export function scout(people: PersonRow[], facts: FactRow[], today: string, limi
     }
   }
 
-  // Cold relationships (skip anyone with an upcoming meeting).
+  // Cooling relationships, judged against each person's OWN cadence (Warm-Keeper).
+  // Skip anyone with an upcoming meeting — you are about to see them.
   for (const p of people) {
     if (peopleWithMeeting.has(p.id)) continue;
     const daysSince = dayDiff(p.last_contact_at, today);
-    if (daysSince >= COLD_DAYS) {
-      signals.push({ signal: { type: "cold", person: lite(p), daysSince, facts: recentFacts(p.id) }, rank: 60 + Math.max(0, 200 - daysSince) });
+    if (Number.isNaN(daysSince)) continue; // unparseable last_contact_at: never flag
+    const cadenceDays = contactCadenceDays((factsByPerson.get(p.id) || []).map((f) => f.created_at));
+    const threshold = coolingThreshold(cadenceDays);
+    if (daysSince >= threshold) {
+      // Rank by how far past the person's own threshold they are, so the most
+      // overdue-relative-to-their-rhythm surfaces first (a weekly friend quiet a
+      // month beats a rare contact just tipping over). Stays in the cold band
+      // (below meetings/commitments/dates/birthdays/connectors) so certain items lead.
+      const overdue = daysSince / threshold; // >= 1 at flag time
+      signals.push({
+        signal: { type: "cold", person: lite(p), daysSince, cadenceDays, facts: recentFacts(p.id) },
+        rank: 60 + Math.max(0, Math.round(40 - overdue * 8)),
+      });
     }
   }
 

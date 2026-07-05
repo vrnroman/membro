@@ -125,7 +125,7 @@ export function Suggestions() {
                           <span className="leading-snug">
                             Introduce <span className="font-medium">{s.personA.name}</span> and{" "}
                             <span className="font-medium">{s.personB.name}</span>{" "}
-                            <span className="text-muted-foreground">— both linked to {s.shared}</span>
+                            <span className="text-muted-foreground">· both linked to {s.shared}</span>
                           </span>
                         </Link>
                       </li>
@@ -140,7 +140,7 @@ export function Suggestions() {
                         <Snowflake className="h-5 w-5 shrink-0 text-muted-foreground" />
                         <span className="leading-snug">
                           Reconnect with <span className="font-medium">{s.person.name}</span>{" "}
-                          <span className="text-muted-foreground">— quiet for {s.daysSince} days</span>
+                          <span className="text-muted-foreground">· quiet for {s.daysSince} days</span>
                         </span>
                       </Link>
                     </li>

@@ -3,9 +3,10 @@ import {
   AiAdapter,
   AssistContextPerson,
   AssistOutput,
+  BriefContent,
+  BriefInput,
   BuiltCard,
   ExtractionResult,
-  PersonLite,
   Signal,
 } from "./types";
 
@@ -98,15 +99,23 @@ export class ClaudeCliAdapter implements AiAdapter {
     return parseJsonObject<BuiltCard>(await runClaude(prompt));
   }
 
-  async brief(person: PersonLite, facts: string[], today: string): Promise<string> {
+  async brief(input: BriefInput): Promise<BriefContent> {
+    const { person, facts, newFacts, cadenceDays, today } = input;
+    const rhythm = cadenceDays ? `They usually talk about every ${cadenceDays} day(s).` : "";
     const prompt = [
-      "You are Membro's meeting-prep engine. Write a short, scannable brief to get the owner ready to talk to this person.",
-      "Lead with one ice-breaker grounded in a real fact, then 2-4 bullets of what to remember and any open follow-ups. Plain English, no em-dashes. Output the brief text only, no preamble.",
+      "You are Membro's Pre-Read engine. Give the owner a decision aid to read in one glance before they talk to this person, not a summary of everything on file.",
+      "Return three parts: read (two short lines: who they are, where things were left), insights (2-4 bullets: what changed since last time, the tension or opportunity now), recommendations (2-4 concrete moves: what to open with grounded in a real fact, what the owner owes or is owed, and only a REAL thing to avoid; never invent a landmine, leave it out if there is none).",
+      "Owner's voice: warm, direct, plain English, no em-dashes, no filler. Never invent specifics not in the facts.",
       `Today is ${today}.`,
       `Person: ${person.name}${person.role ? `, ${person.role}` : ""}${person.company ? ` at ${person.company}` : ""}.`,
-      `What we know:\n- ${facts.join("\n- ") || "(nothing yet)"}`,
-    ].join("\n");
-    return (await runClaude(prompt)).trim();
+      rhythm,
+      newFacts.length ? `New since last prep:\n- ${newFacts.join("\n- ")}` : "Nothing new since last prep.",
+      `On file (newest first):\n- ${facts.join("\n- ") || "(nothing yet)"}`,
+      'Output ONLY a JSON object: {"read":string,"insights":string[],"recommendations":string[]}.',
+    ]
+      .filter(Boolean)
+      .join("\n");
+    return parseJsonObject<BriefContent>(await runClaude(prompt));
   }
 
   async assist(input: { note: string; today: string; people: AssistContextPerson[] }): Promise<AssistOutput> {
@@ -152,8 +161,10 @@ function describeSignal(signal: Signal): string {
       return `Signal: MEETING. The owner meets ${signal.person.name} ${signal.whenLabel}. Facts: ${signal.facts.join("; ") || "none"}. Write a 'brief': a tight prep note with one ice-breaker and the open items.`;
     case "dated":
       return `Signal: DATED EVENT. "${signal.event}" involving ${signal.person.name} is ${signal.whenLabel}. Facts: ${signal.facts.join("; ") || "none"}. Write a 'brief' reminding the owner what is coming up and anything to prepare.`;
-    case "cold":
-      return `Signal: COLD. No contact with ${signal.person.name} in ${signal.daysSince} days. Facts: ${signal.facts.join("; ") || "none"}. Write a 'nudge': a warm low-pressure reconnect message ready to send.`;
+    case "cold": {
+      const anchor = signal.facts[0];
+      return `Signal: COLD. No contact with ${signal.person.name} in ${signal.daysSince} days${signal.cadenceDays ? ` (usually about every ${signal.cadenceDays})` : ""}. Facts, most recent first: ${signal.facts.join("; ") || "none"}. Write a 'nudge': a short, warm, low-pressure reconnect opener ready to send. Anchor it to a REAL recent detail${anchor ? ` such as "${anchor}"` : ""} and ask about that specific thing. Never a generic "just checking in" or "it's been a while".`;
+    }
     case "connector":
       return `Signal: CONNECTOR. ${signal.personA.name} and ${signal.personB.name} are both connected to "${signal.shared}". Facts: ${signal.facts.join("; ") || "none"}. Write a 'connector': a short ready-to-send intro explaining why they should meet.`;
   }

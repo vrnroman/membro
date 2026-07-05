@@ -143,6 +143,21 @@ create table if not exists assist_jobs (
 );
 create index if not exists assist_jobs_due_idx on assist_jobs (status, next_attempt_at);
 
+-- Pre-Read cache: one precomputed brief per person so opening a profile shows the
+-- read, the insights, and the recommendations instantly, with no spinner. body is
+-- the BriefContent as JSON. A background pass keeps it fresh; a fact change flips
+-- 'stale' so that person is regenerated on the next pass (or a manual refresh).
+-- source_fact_count records how many facts it was built from; generated_at is the
+-- "updated Xd ago" stamp and the cutoff for the coarse "new since last prep" diff.
+create table if not exists briefs (
+  person_id         text primary key references people (id) on delete cascade,
+  body              text not null,               -- BriefContent JSON
+  source_fact_count integer not null default 0,
+  stale             integer not null default 0,  -- 1 = a fact changed since; due for refresh
+  generated_at      text not null,
+  updated_at        text not null
+);
+
 -- Tiny key/value store for small bits of durable app state that don't warrant a
 -- table. Today it holds 'last_nudge_date' so the morning Telegram nudge is
 -- idempotent: a second fire on the same local date is a no-op.

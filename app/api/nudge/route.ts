@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { listPeople, listFacts, getKv, setKv } from "@/lib/repo";
-import { dueNudges, formatNudge } from "@/lib/nightshift/nudge";
+import { computeNudge, formatNudge } from "@/lib/nightshift/nudge";
 import { sendTelegramMessage, TelegramSendError } from "@/lib/nightshift/telegram";
 import { localToday } from "@/lib/today";
 
@@ -40,12 +40,14 @@ export async function POST(req: Request) {
   const force = params.get("force") === "1";
 
   const today = localToday(); // owner-local; never throws (a bad MEMBRO_TZ falls back)
-  const items = dueNudges(listPeople(), listFacts(), today);
+  // One Scout pass yields the due items and the single warm-keep, deduped so a
+  // person who is both due and cooling is never named twice.
+  const { items, warmKeep } = computeNudge(listPeople(), listFacts(), today);
   // Quiet days still send an all-clear by default, so the once-a-day nudge
   // visibly stays alive; set MEMBRO_NUDGE_SILENT_WHEN_EMPTY=1 to go silent on
   // empty days once it has earned trust.
   const notifyWhenEmpty = process.env.MEMBRO_NUDGE_SILENT_WHEN_EMPTY !== "1";
-  const message = formatNudge(items, { notifyWhenEmpty });
+  const message = formatNudge(items, { notifyWhenEmpty, warmKeep });
 
   // Only reached when silent-on-empty is on AND nothing is due: send nothing.
   if (!message) {

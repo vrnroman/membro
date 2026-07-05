@@ -1,11 +1,12 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { PersonRow } from "@/lib/membro/types";
-import { Loader2, Copy, Trash2, Sparkles, X } from "lucide-react";
+import type { BriefContent } from "@/lib/ai/types";
+import { Loader2, Copy, Trash2, RefreshCw, X } from "lucide-react";
 
 type Fact = {
   id: string;
@@ -21,10 +22,15 @@ export function PersonProfile({ personId }: { personId: string }) {
   const [person, setPerson] = useState<PersonRow | null>(null);
   const [facts, setFacts] = useState<Fact[]>([]);
   const [loading, setLoading] = useState(true);
-  const [brief, setBrief] = useState<string | null>(null);
+  const [brief, setBrief] = useState<BriefContent | null>(null);
+  const [briefMeta, setBriefMeta] = useState<{ generatedAt: string | null; stale: boolean } | null>(null);
   const [briefing, setBriefing] = useState(false);
+  const [briefError, setBriefError] = useState<string | null>(null);
   const [newNote, setNewNote] = useState("");
   const [copied, setCopied] = useState(false);
+  // First-open guard: auto-build a Pre-Read once when none is cached, without
+  // re-firing on every reload (a note edit reloads but only flags it stale).
+  const autoTried = useRef(false);
 
   async function load() {
     const res = await fetch(`/api/people/${personId}`, { cache: "no-store" });
@@ -36,17 +42,25 @@ export function PersonProfile({ personId }: { personId: string }) {
     const data = await res.json();
     setPerson((data.person ?? null) as PersonRow | null);
     setFacts((data.facts ?? []) as Fact[]);
+    setBrief((data.brief ?? null) as BriefContent | null);
+    setBriefMeta((data.briefMeta ?? null) as { generatedAt: string | null; stale: boolean } | null);
     setLoading(false);
+    // Never-empty on first open: if nothing is cached yet, build one now.
+    if (!data.brief && !autoTried.current) {
+      autoTried.current = true;
+      void generateBrief();
+    }
   }
 
   useEffect(() => {
+    autoTried.current = false;
     load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [personId]);
 
   async function generateBrief() {
     setBriefing(true);
-    setBrief(null);
+    setBriefError(null);
     try {
       const res = await fetch("/api/brief", {
         method: "POST",
@@ -55,12 +69,17 @@ export function PersonProfile({ personId }: { personId: string }) {
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "brief failed");
-      setBrief(data.brief);
+      setBrief(data.brief as BriefContent);
+      setBriefMeta({ generatedAt: data.generatedAt ?? null, stale: false });
     } catch (e) {
-      setBrief(`Could not build a brief: ${(e as Error).message}`);
+      setBriefError((e as Error).message);
     } finally {
       setBriefing(false);
     }
+  }
+
+  function briefToText(b: BriefContent): string {
+    return [b.read, "", "Insights:", ...b.insights.map((i) => `- ${i}`), "", "Recommendations:", ...b.recommendations.map((r) => `- ${r}`)].join("\n");
   }
 
   async function setMeeting(value: string) {
@@ -120,10 +139,6 @@ export function PersonProfile({ personId }: { personId: string }) {
       </div>
 
       <div className="flex flex-wrap items-center gap-3">
-        <Button onClick={generateBrief} disabled={briefing} className="rounded-full">
-          {briefing ? <Loader2 className="mr-1 h-4 w-4 animate-spin" /> : <Sparkles className="mr-1 h-4 w-4" />}
-          Prep brief
-        </Button>
         <label className="flex items-center gap-2 text-sm text-muted-foreground">
           Next meeting
           <input
@@ -138,26 +153,63 @@ export function PersonProfile({ personId }: { personId: string }) {
         </Button>
       </div>
 
-      {brief && (
-        <div className="rounded-2xl border bg-muted/50 p-4">
-          <div className="mb-2 flex items-center justify-between">
-            <span className="text-sm font-medium">Prep brief</span>
-            <Button
-              size="sm"
-              variant="ghost"
-              className="rounded-full"
-              onClick={() => {
-                navigator.clipboard.writeText(brief);
-                setCopied(true);
-                setTimeout(() => setCopied(false), 1500);
-              }}
-            >
-              <Copy className="mr-1 h-4 w-4" /> {copied ? "Copied" : "Copy"}
+      <div className="rounded-2xl border bg-muted/50 p-4">
+        <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+          <div className="flex items-baseline gap-2">
+            <span className="text-sm font-medium">Pre-Read</span>
+            {briefMeta?.generatedAt && !briefing && (
+              <span className="text-xs text-muted-foreground">{agoLabel(briefMeta.generatedAt)}</span>
+            )}
+          </div>
+          <div className="flex items-center gap-1">
+            {brief && (
+              <Button
+                size="sm"
+                variant="ghost"
+                className="rounded-full"
+                onClick={() => {
+                  navigator.clipboard.writeText(briefToText(brief));
+                  setCopied(true);
+                  setTimeout(() => setCopied(false), 1500);
+                }}
+              >
+                <Copy className="mr-1 h-4 w-4" /> {copied ? "Copied" : "Copy"}
+              </Button>
+            )}
+            <Button size="sm" variant="ghost" className="rounded-full" onClick={generateBrief} disabled={briefing}>
+              <RefreshCw className={`mr-1 h-4 w-4 ${briefing ? "animate-spin" : ""}`} /> Refresh
             </Button>
           </div>
-          <p className="whitespace-pre-line text-sm">{brief}</p>
         </div>
-      )}
+
+        {briefMeta?.stale && brief && !briefing && (
+          <p className="mb-3 text-xs text-amber-600 dark:text-amber-400">
+            Facts changed since this was written. Refresh for the current read.
+          </p>
+        )}
+
+        {/* A refresh that fails while a brief is already on screen must still be
+            visible, or the owner reads a stale brief believing it just refreshed. */}
+        {briefError && brief && !briefing && (
+          <p className="mb-3 text-xs text-red-600 dark:text-red-400">Could not refresh: {briefError}</p>
+        )}
+
+        {brief ? (
+          <div className="flex flex-col gap-3">
+            <p className="whitespace-pre-line text-sm leading-relaxed">{brief.read}</p>
+            {brief.insights.length > 0 && <BriefBlock title="Insights" items={brief.insights} />}
+            {brief.recommendations.length > 0 && <BriefBlock title="Recommendations" items={brief.recommendations} />}
+          </div>
+        ) : briefing ? (
+          <p className="flex items-center gap-2 text-sm text-muted-foreground">
+            <Loader2 className="h-4 w-4 animate-spin" /> Preparing your read…
+          </p>
+        ) : briefError ? (
+          <p className="text-sm text-muted-foreground">Could not build a read: {briefError}</p>
+        ) : (
+          <p className="text-sm text-muted-foreground">No read yet.</p>
+        )}
+      </div>
 
       {commitments.length > 0 && (
         <Section title="Promises">
@@ -261,4 +313,30 @@ function Section({ title, children }: { title: string; children: React.ReactNode
       {children}
     </div>
   );
+}
+
+// One labelled block of the Pre-Read (Insights or Recommendations), as a short
+// scannable bulleted list.
+function BriefBlock({ title, items }: { title: string; items: string[] }) {
+  return (
+    <div>
+      <h3 className="mb-1 text-xs font-semibold uppercase tracking-wide text-muted-foreground">{title}</h3>
+      <ul className="flex list-disc flex-col gap-1 pl-5 text-sm">
+        {items.map((it, i) => (
+          <li key={i}>{it}</li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+// "updated Xd ago" stamp from an ISO timestamp; empty for a missing/bad value.
+function agoLabel(iso: string | null): string {
+  if (!iso) return "";
+  const ms = Date.now() - Date.parse(iso);
+  if (Number.isNaN(ms)) return "";
+  const days = Math.floor(ms / 86400000);
+  if (days <= 0) return "updated today";
+  if (days === 1) return "updated yesterday";
+  return `updated ${days} days ago`;
 }

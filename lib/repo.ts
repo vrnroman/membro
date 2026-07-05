@@ -70,6 +70,9 @@ export function updatePerson(id: string, patch: Record<string, unknown>): void {
   db()
     .prepare(`update people set ${set}, updated_at = @__ts where id = @__id`)
     .run({ ...patch, __ts: now(), __id: id });
+  // The brief renders who-they-are (company / role), so a change to those makes
+  // the cached Pre-Read out of date the same way a fact change does.
+  if (keys.includes("company") || keys.includes("role")) markBriefStale(id);
 }
 
 export function touchPerson(id: string): void {
@@ -84,7 +87,7 @@ export function deletePerson(id: string): void {
 // ── Facts ───────────────────────────────────────────────────────────────────
 export function listFacts(): FactRow[] {
   return db()
-    .prepare("select id, person_id, kind, content, due_at, status from facts order by created_at desc")
+    .prepare("select id, person_id, kind, content, due_at, status, created_at from facts order by created_at desc")
     .all() as FactRow[];
 }
 
@@ -134,10 +137,13 @@ export function insertFact(f: {
       confidence: f.confidence ?? 1,
       created_at: now(),
     });
+  markBriefStale(f.person_id); // a new fact makes this person's Pre-Read out of date
 }
 
 export function updateFactStatus(id: string, status: "open" | "done"): void {
   db().prepare("update facts set status = ? where id = ?").run(status, id);
+  const row = db().prepare("select person_id from facts where id = ?").get(id) as { person_id: string } | undefined;
+  if (row) markBriefStale(row.person_id);
 }
 
 // Delete a fact and any action (card) that was stored solely because of it.
@@ -149,11 +155,13 @@ export function updateFactStatus(id: string, status: "open" | "done"): void {
 // stale pending ones self-heal on the next nightshift regenerate.
 export function deleteFact(id: string): void {
   const d = db();
+  const owner = d.prepare("select person_id from facts where id = ?").get(id) as { person_id: string } | undefined;
   const tx = d.transaction((factId: string) => {
     d.prepare("delete from cards where json_extract(meta, '$.source_fact_id') = ?").run(factId);
     d.prepare("delete from facts where id = ?").run(factId);
   });
   tx(id);
+  if (owner) markBriefStale(owner.person_id); // removing a fact makes the Pre-Read out of date
 }
 
 // ── Captures ────────────────────────────────────────────────────────────────
@@ -302,6 +310,68 @@ export function setKv(key: string, value: string): void {
        on conflict(key) do update set value = excluded.value, updated_at = excluded.updated_at`,
     )
     .run(key, value, now());
+}
+
+// ── Briefs (Pre-Read cache) ───────────────────────────────────────────────────
+export type BriefRow = {
+  person_id: string;
+  body: string; // BriefContent JSON
+  source_fact_count: number;
+  stale: number; // 0 | 1
+  generated_at: string;
+  updated_at: string;
+};
+
+export function getBrief(personId: string): BriefRow | null {
+  return (db().prepare("select * from briefs where person_id = ?").get(personId) as BriefRow) ?? null;
+}
+
+// Store (or replace) a person's precomputed brief, clearing the stale flag. One
+// row per person, so a regenerate overwrites rather than accumulating.
+export function upsertBrief(b: { personId: string; body: string; sourceFactCount: number }): void {
+  const ts = now();
+  db()
+    .prepare(
+      `insert into briefs (person_id, body, source_fact_count, stale, generated_at, updated_at)
+       values (@person_id, @body, @count, 0, @ts, @ts)
+       on conflict(person_id) do update set
+         body = excluded.body,
+         source_fact_count = excluded.source_fact_count,
+         stale = 0,
+         generated_at = excluded.generated_at,
+         updated_at = excluded.updated_at`,
+    )
+    .run({ person_id: b.personId, body: b.body, count: b.sourceFactCount, ts });
+}
+
+// Flag a person's brief as out of date (a fact of theirs changed). A no-op if
+// they have no brief yet — the background pass will build one from scratch. Never
+// throws into the caller: marking a brief stale must not fail a fact write.
+export function markBriefStale(personId: string): void {
+  try {
+    db().prepare("update briefs set stale = 1, updated_at = ? where person_id = ?").run(now(), personId);
+  } catch (e) {
+    console.error(`[briefs] could not mark brief stale for ${personId}: ${(e as Error).message}`);
+  }
+}
+
+// People whose brief is due for a (re)generation, most-deserving first: those
+// with no brief at all, then the ones flagged stale, then the oldest. Skips the
+// diary self row (it is never a relationship). Bounded by the caller because each
+// brief is an AI call.
+export function listPeopleNeedingBrief(staleBeforeISO: string, limit: number): string[] {
+  const rows = db()
+    .prepare(
+      `select p.id as id
+       from people p
+       left join briefs b on b.person_id = p.id
+       where p.id != @self
+         and (b.person_id is null or b.stale = 1 or b.generated_at < @cutoff)
+       order by (b.person_id is null) desc, b.stale desc, b.generated_at asc
+       limit @limit`,
+    )
+    .all({ self: SELF_ID, cutoff: staleBeforeISO, limit }) as { id: string }[];
+  return rows.map((r) => r.id);
 }
 
 // ── Diary (the owner's own thread on the reserved self row) ───────────────────

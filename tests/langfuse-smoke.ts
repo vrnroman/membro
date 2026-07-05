@@ -27,7 +27,13 @@ async function main() {
   const connector: Signal = { type: "connector", personA: { id: "p1", name: "Dana", company: null, role: null, blurb: null }, personB: { id: "p2", name: "Raj", company: null, role: null, blurb: null }, shared: "Tokyo", facts: [] };
   await ai.buildCard(birthday, TODAY);
   await ai.buildCard(connector, TODAY);
-  await ai.brief({ id: "p1", name: "Dana", company: null, role: null, blurb: null }, ["moved to the design team"], TODAY);
+  await ai.brief({
+    person: { id: "p1", name: "Dana", company: null, role: null, blurb: null },
+    facts: ["moved to the design team"],
+    newFacts: [],
+    cadenceDays: null,
+    today: TODAY,
+  });
 
   console.log("sent 5 generations, flushing…");
   await flushLangfuse();

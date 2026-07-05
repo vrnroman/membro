@@ -4,11 +4,13 @@ import {
   AssistContextPerson,
   AssistOutput,
   ASSIST_SCHEMA,
+  BriefContent,
+  BriefInput,
+  BRIEF_SCHEMA,
   BuiltCard,
   CARD_SCHEMA,
   EXTRACTION_SCHEMA,
   ExtractionResult,
-  PersonLite,
   Signal,
 } from "./types";
 
@@ -98,28 +100,37 @@ export class ClaudeAdapter implements AiAdapter {
     return JSON.parse(firstText(message)) as BuiltCard;
   }
 
-  async brief(person: PersonLite, facts: string[], today: string): Promise<string> {
+  async brief(input: BriefInput): Promise<BriefContent> {
+    const { person, facts, newFacts, cadenceDays, today } = input;
     const system = [
-      "You are Membro's meeting-prep engine. Write a short, scannable brief that gets the owner ready to walk into a conversation with this person.",
-      "Lead with one ice-breaker grounded in a real fact. Then 2-4 bullets of what to remember and any open follow-ups. Plain English, no em-dashes, no filler.",
+      "You are Membro's Pre-Read engine. Before the owner talks to this person, hand them a decision aid they can read in one glance, not a summary of everything on file.",
+      "Return three parts:",
+      "- read: two short lines. Who this person is to the owner, and where things were left (the last real thread, the mood).",
+      "- insights: 2 to 4 short bullets. What CHANGED since last time, and the tension or the opportunity that matters NOW. Draw only from the facts given.",
+      "- recommendations: 2 to 4 short, concrete moves. What to open with (grounded in a real fact), anything the owner owes this person or is owed, and only a REAL thing to avoid. Never invent a landmine that is not in the facts; if there is nothing to avoid, leave it out.",
+      "Write in the owner's voice: warm, direct, plain English, no em-dashes, no filler, no therapy-speak. Never invent specifics not in the facts.",
       `Today is ${today}.`,
     ].join("\n");
+
+    const rhythm = cadenceDays ? `They usually talk about every ${cadenceDays} day(s).` : "";
+    const userContent = [
+      `Person: ${person.name}${person.role ? `, ${person.role}` : ""}${person.company ? ` at ${person.company}` : ""}.`,
+      rhythm,
+      newFacts.length ? `New since the owner's last prep:\n- ${newFacts.join("\n- ")}` : "Nothing new since the last prep.",
+      `Everything on file (newest first):\n- ${facts.join("\n- ") || "(nothing yet)"}`,
+    ]
+      .filter(Boolean)
+      .join("\n\n");
 
     const message = await client().messages.create({
       model: MODEL,
       max_tokens: 1024,
       system,
-      messages: [
-        {
-          role: "user",
-          content: `Person: ${person.name}${person.role ? `, ${person.role}` : ""}${
-            person.company ? ` at ${person.company}` : ""
-          }.\nWhat we know:\n- ${facts.join("\n- ") || "(nothing yet)"}`,
-        },
-      ],
+      messages: [{ role: "user", content: userContent }],
+      output_config: { format: { type: "json_schema", schema: BRIEF_SCHEMA } },
     } as Anthropic.MessageCreateParamsNonStreaming);
 
-    return firstText(message).trim();
+    return JSON.parse(firstText(message)) as BriefContent;
   }
 
   async assist(input: { note: string; today: string; people: AssistContextPerson[] }): Promise<AssistOutput> {
@@ -177,8 +188,10 @@ function describeSignal(signal: Signal): string {
       return `Signal: MEETING. The owner is meeting ${signal.person.name} ${signal.whenLabel}. Facts: ${signal.facts.join("; ") || "none"}. Write a 'brief' card: a tight prep note with one ice-breaker and the open items to raise.`;
     case "dated":
       return `Signal: DATED EVENT. "${signal.event}" involving ${signal.person.name} is ${signal.whenLabel}. Facts: ${signal.facts.join("; ") || "none"}. Write a 'brief' card reminding the owner what is coming up and anything to prepare.`;
-    case "cold":
-      return `Signal: COLD. The owner has not spoken with ${signal.person.name} in ${signal.daysSince} days. Facts: ${signal.facts.join("; ") || "none"}. Write a 'nudge' card: a warm, low-pressure reconnect message ready to send.`;
+    case "cold": {
+      const anchor = signal.facts[0];
+      return `Signal: COLD. The owner has not spoken with ${signal.person.name} in ${signal.daysSince} days${signal.cadenceDays ? ` (they usually talk about every ${signal.cadenceDays})` : ""}. Facts, most recent first: ${signal.facts.join("; ") || "none"}. Write a 'nudge' card: a short, warm, low-pressure reconnect opener ready to send. Anchor it to a REAL recent detail${anchor ? ` such as "${anchor}"` : ""} and ask about that specific thing. Never a generic "just checking in" or "it's been a while".`;
+    }
     case "connector":
       return `Signal: CONNECTOR. ${signal.personA.name} and ${signal.personB.name} are both connected to "${signal.shared}". Facts: ${signal.facts.join("; ") || "none"}. Write a 'connector' card: a short, ready-to-send intro that explains why these two should meet.`;
   }

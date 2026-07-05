@@ -1,6 +1,6 @@
 import { startObservation } from "@langfuse/tracing";
 import { langfuseEnabled } from "@/lib/observability/langfuse";
-import { AiAdapter, AssistOutput, BuiltCard, ExtractionResult, PersonLite, Signal } from "./types";
+import { AiAdapter, AssistOutput, BriefContent, BriefInput, BuiltCard, ExtractionResult, Signal } from "./types";
 
 // Wrap any AiAdapter so each call shows up in Langfuse as a generation with its
 // input, output, the engine used (mock / claude / claude-cli), and errors. The
@@ -46,14 +46,14 @@ export function observed(adapter: AiAdapter): AiAdapter {
       }
     },
 
-    async brief(person: PersonLite, facts: string[], today: string): Promise<string> {
+    async brief(input: BriefInput): Promise<BriefContent> {
       const gen = startObservation(
         "membro.brief",
-        { model, input: { person: person.name, facts } },
+        { model, input: { person: input.person.name, facts: input.facts, newFacts: input.newFacts, cadenceDays: input.cadenceDays } },
         { asType: "generation" },
       );
       try {
-        const out = await adapter.brief(person, facts, today);
+        const out = await adapter.brief(input);
         gen.update({ output: out, metadata: { adapter: adapter.label } }).end();
         return out;
       } catch (e) {

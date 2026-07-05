@@ -2,11 +2,12 @@ import type {
   AiAdapter,
   AssistContextPerson,
   AssistOutput,
+  BriefContent,
+  BriefInput,
   BuiltCard,
   ExtractedEntity,
   ExtractedFact,
   ExtractionResult,
-  PersonLite,
   Signal,
 } from "./types";
 
@@ -175,31 +176,56 @@ export class MockAdapter implements AiAdapter {
           body: `"${signal.event}" is ${signal.whenLabel}. Anything to prepare for ${signal.person.name}?`,
           why: `A dated event involving ${signal.person.name} is ${signal.whenLabel}.`,
         };
-      case "cold":
+      case "cold": {
+        const first = signal.person.name.split(" ")[0];
+        const anchor = signal.facts[0];
         return {
           kind: "nudge",
           title: `Reconnect with ${signal.person.name} (${signal.daysSince}d quiet)`,
-          body: `Hi ${signal.person.name.split(" ")[0]}, it's been a while. You crossed my mind today and I'd love to catch up. Free for a coffee or quick call this week?`,
-          why: `No contact with ${signal.person.name} in ${signal.daysSince} days.`,
+          // Anchor the opener to a real recent fact when we have one, so it never
+          // reads as a generic "just checking in".
+          body: anchor
+            ? `Hi ${first}, you crossed my mind today. Still thinking about ${anchor}, how did that land? Would love to catch up properly soon.`
+            : `Hi ${first}, you crossed my mind today and I'd love to catch up. Free for a coffee or quick call this week?`,
+          why: signal.cadenceDays
+            ? `You usually talk about every ${signal.cadenceDays} days, and it has been ${signal.daysSince}.`
+            : `No contact with ${signal.person.name} in ${signal.daysSince} days.`,
         };
+      }
       case "connector":
         return {
           kind: "connector",
           title: `Introduce ${signal.personA.name.split(" ")[0]} ↔ ${signal.personB.name.split(" ")[0]} (${signal.shared})`,
-          body: `Hi both, quick intro. ${signal.personA.name} — meet ${signal.personB.name}. You're both connected to ${signal.shared}, so I thought you should know each other. I'll let you two take it from here.`,
+          body: `Hi both, quick intro. ${signal.personA.name}, meet ${signal.personB.name}. You're both connected to ${signal.shared}, so I thought you should know each other. I'll let you two take it from here.`,
           why: `${signal.personA.name} and ${signal.personB.name} are both linked to ${signal.shared}.`,
         };
     }
   }
 
-  async brief(person: PersonLite, facts: string[]): Promise<string> {
+  // Deterministic structured Pre-Read, honest to the facts (invents nothing), so
+  // the keyless path and the pipeline test exercise the same three-block shape the
+  // model returns. The generator prepends the deterministic rhythm / new-since
+  // lines, so this only produces the qualitative read, insights, and moves.
+  async brief(input: BriefInput): Promise<BriefContent> {
+    const { person, facts } = input;
     const first = person.name.split(" ")[0];
-    return [
-      `Ice-breaker: ${facts[0] ? `ask about ${facts[0].toLowerCase()}` : `ask ${first} what they're working on`}.`,
-      "",
-      "Remember:",
-      ...(facts.length ? facts.slice(0, 4).map((f) => `- ${f}`) : ["- nothing on file yet"]),
-    ].join("\n");
+    const who = [person.role, person.company].filter(Boolean).join(" at ");
+    const read = [
+      who ? `${person.name}, ${who}.` : `${person.name}.`,
+      facts[0] ? `Last on file: ${facts[0]}.` : "Nothing on file yet, so this is a fresh start.",
+    ].join(" ");
+
+    const openThread = facts.find((f) => /\b(owe|promised|send|deliver|follow up|waiting)\b/i.test(f));
+    const insights: string[] = [];
+    if (facts.length > 1) insights.push(`${facts.length} things on file about ${first} so far.`);
+    if (openThread) insights.push(`Looks like an open thread: ${openThread}.`);
+
+    const recommendations: string[] = [
+      facts[0] ? `Open with what you last noted: ${facts[0]}.` : `Ask ${first} what they are working on.`,
+    ];
+    if (openThread) recommendations.push(`Close the loop on: ${openThread}.`);
+
+    return { read, insights, recommendations };
   }
 
   // Deterministic classifier + starter, good enough to drive the assistant path

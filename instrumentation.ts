@@ -10,5 +10,8 @@ export async function register() {
     // Drain the assistant queue: draft / advise / diary each captured note.
     const { startAssistWorker } = await import("@/lib/assist/worker");
     startAssistWorker();
+    // Keep the Pre-Read cache warm so opening any profile is instant.
+    const { startBriefWorker } = await import("@/lib/briefs/worker");
+    startBriefWorker();
   }
 }

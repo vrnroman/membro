@@ -46,6 +46,34 @@ export type AssistOutput = {
 // ground a reply in real facts instead of writing from a blank page.
 export type AssistContextPerson = { name: string; facts: string[] };
 
+// Pre-Read. The prep "brief" is no longer a wall of prose you read on a click;
+// it is a decision aid, computed in the background and shown the instant a person
+// is opened. Three scannable blocks:
+//   read            = two lines: who they are, and where you left it.
+//   insights        = what changed since last time, the tension or opportunity now.
+//   recommendations = concrete moves: open with X, you owe them Y, they owe you Z,
+//                     what to avoid. Never a fabricated landmine — only real ones.
+export type BriefContent = {
+  read: string;
+  insights: string[];
+  recommendations: string[];
+};
+
+// What the generator hands the adapter. `facts` is everything known (newest
+// first); `newFacts` are just the ones filed since the last brief (the coarse
+// "what changed" diff); `cadenceDays` is the contact rhythm so the model can weave
+// in "you usually talk every ~N days." The caller still prepends the DETERMINISTIC
+// rhythm and new-since lines itself, so the numbers are never left to the model to
+// invent. Deliberately NO absolute "N days ago": a precise recency baked into a
+// cached brief goes wrong as it ages; the stable cadence is what we surface.
+export type BriefInput = {
+  person: PersonLite;
+  facts: string[];
+  newFacts: string[];
+  cadenceDays: number | null;
+  today: string;
+};
+
 // A "ripe" item the deterministic Scout found. The AI Builder turns one of these
 // into a finished card. Person snapshots are plain objects so the Builder is
 // pure with respect to the database.
@@ -62,7 +90,7 @@ export type Signal =
   | { type: "commitment"; person: PersonLite; commitment: string; dueLabel: string | null; facts: string[]; factId?: string }
   | { type: "meeting"; person: PersonLite; whenLabel: string; facts: string[] }
   | { type: "dated"; person: PersonLite; event: string; whenLabel: string; daysUntil: number; facts: string[]; factId?: string }
-  | { type: "cold"; person: PersonLite; daysSince: number; facts: string[] }
+  | { type: "cold"; person: PersonLite; daysSince: number; cadenceDays: number | null; facts: string[] }
   | { type: "connector"; personA: PersonLite; personB: PersonLite; shared: string; facts: string[] };
 
 export type BuiltCard = {
@@ -76,7 +104,7 @@ export interface AiAdapter {
   readonly label: string; // "claude" | "mock", surfaced in the UI
   extract(input: { text: string; today: string; existingNames: string[]; imageBase64?: string; imageMediaType?: string }): Promise<ExtractionResult>;
   buildCard(signal: Signal, today: string): Promise<BuiltCard>;
-  brief(person: PersonLite, facts: string[], today: string): Promise<string>;
+  brief(input: BriefInput): Promise<BriefContent>;
   // Per-note assistant: classify a freshly captured note and start the work.
   assist(input: { note: string; today: string; people: AssistContextPerson[] }): Promise<AssistOutput>;
   // Diary reflection: a short memo over the owner's own recent entries.
@@ -132,6 +160,17 @@ export const CARD_SCHEMA = {
     why: { type: "string" },
   },
   required: ["kind", "title", "body", "why"],
+} as const;
+
+export const BRIEF_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    read: { type: "string" },
+    insights: { type: "array", items: { type: "string" } },
+    recommendations: { type: "array", items: { type: "string" } },
+  },
+  required: ["read", "insights", "recommendations"],
 } as const;
 
 export const ASSIST_SCHEMA = {

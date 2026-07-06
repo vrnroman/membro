@@ -14,6 +14,7 @@ type Fact = {
   content: string;
   due_at: string | null;
   status: "open" | "done";
+  owed_by: "me" | "them";
   created_at: string;
 };
 
@@ -218,6 +219,7 @@ export function PersonProfile({ personId }: { personId: string }) {
               <input type="checkbox" checked={f.status === "done"} onChange={() => toggleDone(f)} className="mt-1" />
               <span className={f.status === "done" ? "text-muted-foreground line-through" : ""}>
                 {f.content}
+                <span className="ml-2 text-xs text-muted-foreground">{f.owed_by === "them" ? "they owe you" : "you owe"}</span>
                 {f.due_at && <span className="ml-2 text-xs text-muted-foreground">due {f.due_at.slice(0, 10)}</span>}
               </span>
               <DeleteControl onDelete={() => deleteFact(f.id)} label="Remove promise" />

@@ -31,6 +31,11 @@ function migrate(d: Database.Database): void {
   // capture_id ties a diary entry to its source note so a worker re-run replaces
   // it (rerun-safety) while genuinely repeated notes on different days are kept.
   if (!factCols.includes("capture_id")) d.exec("alter table facts add column capture_id text");
+  // owed_by is the direction of a commitment: 'me' = I promised them, 'them' =
+  // they owe me (the Ledger of Owes). Added without the CHECK (SQLite ALTER can't
+  // add a constraint; the app enforces the enum) and defaulted to 'me', which
+  // backfills every existing commitment to the old implicit assumption.
+  if (!factCols.includes("owed_by")) d.exec("alter table facts add column owed_by text not null default 'me'");
 }
 
 // Single-user app: no user_id, no row-level security (the whole app is gated to
@@ -59,6 +64,9 @@ create table if not exists facts (
   content    text not null,
   due_at     text,
   status     text not null default 'open' check (status in ('open','done')),
+  -- Direction of a commitment: 'me' = I owe them, 'them' = they owe me. Only
+  -- meaningful for kind='commitment'; other kinds keep the harmless 'me' default.
+  owed_by    text not null default 'me' check (owed_by in ('me','them')),
   confidence real not null default 1,
   capture_id text,
   created_at text not null

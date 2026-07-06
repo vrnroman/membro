@@ -3,20 +3,14 @@
 import { useState } from "react";
 import Link from "next/link";
 import { scout, isActionSignal, PersonRow, FactRow } from "@/lib/nightshift/scout";
+import { dueTone } from "@/lib/utils";
 import { Cake, CalendarClock, CalendarDays, Circle, Loader2 } from "lucide-react";
 
 // The certain to-do list: what the owner needs to do soon, drawn straight from
 // the data (no AI) so every item is grounded — a promise they made, a meeting
 // they set, a birthday coming up. Speculative ideas live on the Suggestions
-// screen; nothing uncertain shows up here.
-
-// Colour a due label by urgency without over-decorating the list.
-function dueTone(label: string | null): string {
-  if (!label) return "text-muted-foreground";
-  if (label === "overdue") return "text-red-600 dark:text-red-400";
-  if (label === "today" || label === "tomorrow") return "text-amber-600 dark:text-amber-400";
-  return "text-muted-foreground";
-}
+// screen; nothing uncertain shows up here. Only what the owner OWES appears here;
+// what others owe the owner lives on the Promises ledger, not the to-do list.
 
 export function ActionItems({
   people,
@@ -32,7 +26,12 @@ export function ActionItems({
   // Generous limit, then keep only the certain signals — this is the whole
   // to-do list, not a top-N teaser. `today` is the owner-local date from the
   // snapshot, so this list agrees with its own header and the Telegram nudge.
-  const items = today ? scout(people, facts, today, 100).filter(isActionSignal) : [];
+  // A "they owe me" commitment is not a to-do; it lives on the Promises ledger.
+  const items = today
+    ? scout(people, facts, today, 100)
+        .filter(isActionSignal)
+        .filter((s) => s.type !== "commitment" || s.owedBy === "me")
+    : [];
   const [saving, setSaving] = useState<string | null>(null);
 
   async function markDone(factId: string) {

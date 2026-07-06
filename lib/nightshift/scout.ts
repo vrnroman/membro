@@ -16,6 +16,8 @@ export type PersonRow = {
   last_contact_at: string;
 };
 
+export type OwedBy = "me" | "them"; // direction of a commitment: I owe them / they owe me
+
 export type FactRow = {
   id: string;
   person_id: string;
@@ -23,6 +25,7 @@ export type FactRow = {
   content: string;
   due_at: string | null;
   status: "open" | "done";
+  owed_by: OwedBy;
   created_at: string; // when we filed it — the raw signal for contact cadence
 };
 
@@ -190,12 +193,12 @@ export function scout(people: PersonRow[], facts: FactRow[], today: string, limi
       });
     }
 
-    // Open commitments.
+    // Open commitments (both directions; consumers filter by owed_by).
     for (const f of pf) {
       if (f.kind === "commitment" && f.status === "open") {
         const dueLabel = f.due_at ? meetingLabel(today, f.due_at) : null;
         signals.push({
-          signal: { type: "commitment", person: lite(p), commitment: f.content, dueLabel, facts: recentFacts(p.id), factId: f.id },
+          signal: { type: "commitment", person: lite(p), commitment: f.content, dueLabel, owedBy: f.owed_by, facts: recentFacts(p.id), factId: f.id },
           rank: 10 + (f.due_at ? Math.max(0, dayDiff(today, f.due_at)) : 5),
         });
       }
@@ -315,4 +318,62 @@ export function horizon(people: PersonRow[], facts: FactRow[], today: string, li
     }
   }
   return out.sort((a, b) => a.daysUntil - b.daysUntil).slice(0, limit);
+}
+
+// ── Ledger of Owes ────────────────────────────────────────────────────────────
+// Every open commitment, both directions, as one scannable balance. Unlike the
+// Scout's ranked top-N, this returns ALL open owes (the ledger is a full view,
+// not a teaser), split into what the owner owes and what the owner is owed, each
+// sorted by urgency: most overdue first, then soonest due, then undated last.
+export type OweItem = {
+  factId: string;
+  personId: string;
+  personName: string;
+  content: string;
+  dueLabel: string | null; // "overdue" | "today" | "tomorrow" | "in N days" | null (reuses meetingLabel)
+  daysUntil: number | null; // null = undated or unparseable
+  overdue: boolean;
+};
+
+export type Ledger = { youOwe: OweItem[]; theyOwe: OweItem[] };
+
+// Undated items sort to the very bottom of a group; a dated item sorts by how
+// soon it is due, so a negative (overdue) value leads and the most overdue leads it.
+function oweRank(i: OweItem): number {
+  return i.daysUntil === null ? Number.MAX_SAFE_INTEGER : i.daysUntil;
+}
+
+export function buildLedger(people: PersonRow[], facts: FactRow[], today: string): Ledger {
+  const nameById = new Map(people.filter((p) => p.id !== SELF_ID).map((p) => [p.id, p.name]));
+  const youOwe: OweItem[] = [];
+  const theyOwe: OweItem[] = [];
+
+  for (const f of facts) {
+    if (f.kind !== "commitment" || f.status !== "open") continue;
+    const name = nameById.get(f.person_id);
+    if (!name) continue; // skip the diary self row and orphaned facts
+
+    const d = f.due_at ? dayDiff(today, f.due_at) : NaN;
+    const daysUntil = Number.isNaN(d) ? null : d;
+    // meetingLabel returns "unknown" for an unparseable date; show no chip rather
+    // than a literal "unknown" (only reachable via a hallucinated stored date, as
+    // the PATCH route rejects bad due_at values).
+    const rawLabel = f.due_at ? meetingLabel(today, f.due_at) : null;
+    const dueLabel = rawLabel === "unknown" ? null : rawLabel;
+    const item: OweItem = {
+      factId: f.id,
+      personId: f.person_id,
+      personName: name,
+      content: f.content,
+      dueLabel,
+      daysUntil,
+      overdue: dueLabel === "overdue",
+    };
+    (f.owed_by === "them" ? theyOwe : youOwe).push(item);
+  }
+
+  const byUrgency = (a: OweItem, b: OweItem) => oweRank(a) - oweRank(b);
+  youOwe.sort(byUrgency);
+  theyOwe.sort(byUrgency);
+  return { youOwe, theyOwe };
 }

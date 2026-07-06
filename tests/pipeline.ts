@@ -7,12 +7,14 @@ import {
   isActionSignal,
   contactCadenceDays,
   coolingThreshold,
+  buildLedger,
   COLD_DAYS,
   MIN_COOLING_DAYS,
   PersonRow,
   FactRow,
 } from "@/lib/nightshift/scout";
 import { dueNudges, formatNudge, topWarmKeep, computeNudge } from "@/lib/nightshift/nudge";
+import type { Signal } from "@/lib/ai/types";
 import { isoToLocalDate } from "@/lib/today";
 
 const TODAY = "2026-06-27";
@@ -25,7 +27,7 @@ function addDays(iso: string, days: number): string {
 
 // A plain fact filed `daysAgo` before TODAY — the raw material for contact cadence.
 function factDaysAgo(pid: string, j: number, daysAgo: number): FactRow {
-  return { id: `${pid}-c${j}`, person_id: pid, kind: "fact", content: "chatted", due_at: null, status: "open", created_at: `${addDays(TODAY, -daysAgo)}T12:00:00Z` };
+  return { id: `${pid}-c${j}`, person_id: pid, kind: "fact", content: "chatted", due_at: null, status: "open", owed_by: "me", created_at: `${addDays(TODAY, -daysAgo)}T12:00:00Z` };
 }
 
 const DEMO =
@@ -68,7 +70,7 @@ async function main() {
     last_contact_at: `${TODAY}T12:00:00Z`,
   }));
   const facts: FactRow[] = entities.flatMap((e, i) =>
-    e.facts.map((f, j) => ({ id: `p${i}-f${j}`, person_id: `p${i}`, kind: f.kind, content: f.content, due_at: f.due_at ?? null, status: "open" as const, created_at: `${TODAY}T12:00:00Z` })),
+    e.facts.map((f, j) => ({ id: `p${i}-f${j}`, person_id: `p${i}`, kind: f.kind, content: f.content, due_at: f.due_at ?? null, status: "open" as const, owed_by: f.owed_by ?? ("me" as const), created_at: `${TODAY}T12:00:00Z` })),
   );
 
   // 3. Scout finds what's ripe.
@@ -134,8 +136,8 @@ async function main() {
     { id: "d1", name: "Nadia", company: null, role: null, blurb: null, birthday: null, next_meeting_at: null, last_contact_at: `${TODAY}T12:00:00Z` },
   ];
   const datedFacts: FactRow[] = [
-    { id: "df1", person_id: "d1", kind: "date", content: "Product launch", due_at: `${addDays(TODAY, 10)}T09:00:00Z`, status: "open", created_at: `${TODAY}T12:00:00Z` },
-    { id: "df2", person_id: "d1", kind: "date", content: "Offsite in Lisbon", due_at: `${addDays(TODAY, 60)}T09:00:00Z`, status: "open", created_at: `${TODAY}T12:00:00Z` },
+    { id: "df1", person_id: "d1", kind: "date", content: "Product launch", due_at: `${addDays(TODAY, 10)}T09:00:00Z`, status: "open", owed_by: "me", created_at: `${TODAY}T12:00:00Z` },
+    { id: "df2", person_id: "d1", kind: "date", content: "Offsite in Lisbon", due_at: `${addDays(TODAY, 60)}T09:00:00Z`, status: "open", owed_by: "me", created_at: `${TODAY}T12:00:00Z` },
   ];
   const datedSignals = scout(datedPeople, datedFacts, TODAY, 50);
   const soon = datedSignals.find((s) => s.type === "dated");
@@ -146,7 +148,7 @@ async function main() {
 
   // Overdue open date facts must not fall through both surfaces.
   const overdueFacts: FactRow[] = [
-    { id: "df3", person_id: "d1", kind: "date", content: "Missed launch", due_at: `${addDays(TODAY, -5)}T09:00:00Z`, status: "open", created_at: `${TODAY}T12:00:00Z` },
+    { id: "df3", person_id: "d1", kind: "date", content: "Missed launch", due_at: `${addDays(TODAY, -5)}T09:00:00Z`, status: "open", owed_by: "me", created_at: `${TODAY}T12:00:00Z` },
   ];
   const overdueSignals = scout(datedPeople, overdueFacts, TODAY, 50);
   const overdue = overdueSignals.find((s) => s.type === "dated");
@@ -157,7 +159,7 @@ async function main() {
   const selfPeople: PersonRow[] = [
     { id: "self", name: "You", company: null, role: null, blurb: null, birthday: null, next_meeting_at: null, last_contact_at: "2020-01-01T00:00:00Z" },
   ];
-  const selfFacts: FactRow[] = [{ id: "sf1", person_id: "self", kind: "commitment", content: "meditate", due_at: null, status: "open", created_at: `${TODAY}T12:00:00Z` }];
+  const selfFacts: FactRow[] = [{ id: "sf1", person_id: "self", kind: "commitment", content: "meditate", due_at: null, status: "open", owed_by: "me", created_at: `${TODAY}T12:00:00Z` }];
   check("self row yields no signals", scout(selfPeople, selfFacts, TODAY).length === 0);
 
   // 9. Morning nudge: only what's due today or tomorrow, most urgent first,
@@ -169,11 +171,11 @@ async function main() {
     { id: "n4", name: "Deb", company: null, role: null, blurb: null, birthday: null, next_meeting_at: null, last_contact_at: `${TODAY}T12:00:00Z` },
   ];
   const nudgeFacts: FactRow[] = [
-    { id: "nf1", person_id: "n3", kind: "commitment", content: "send the deck", due_at: `${TODAY}T09:00:00Z`, status: "open", created_at: `${TODAY}T12:00:00Z` }, // due today
-    { id: "nf2", person_id: "n3", kind: "commitment", content: "call the vendor", due_at: `${addDays(TODAY, -2)}T09:00:00Z`, status: "open", created_at: `${TODAY}T12:00:00Z` }, // overdue -> excluded
-    { id: "nf3", person_id: "n3", kind: "commitment", content: "review the doc", due_at: null, status: "open", created_at: `${TODAY}T12:00:00Z` }, // undated -> excluded
-    { id: "nf4", person_id: "n4", kind: "date", content: "Product launch", due_at: `${addDays(TODAY, 1)}T09:00:00Z`, status: "open", created_at: `${TODAY}T12:00:00Z` }, // tomorrow
-    { id: "nf5", person_id: "n4", kind: "date", content: "Offsite in Lisbon", due_at: `${addDays(TODAY, 40)}T09:00:00Z`, status: "open", created_at: `${TODAY}T12:00:00Z` }, // far -> excluded
+    { id: "nf1", person_id: "n3", kind: "commitment", content: "send the deck", due_at: `${TODAY}T09:00:00Z`, status: "open", owed_by: "me", created_at: `${TODAY}T12:00:00Z` }, // due today
+    { id: "nf2", person_id: "n3", kind: "commitment", content: "call the vendor", due_at: `${addDays(TODAY, -2)}T09:00:00Z`, status: "open", owed_by: "me", created_at: `${TODAY}T12:00:00Z` }, // overdue -> excluded
+    { id: "nf3", person_id: "n3", kind: "commitment", content: "review the doc", due_at: null, status: "open", owed_by: "me", created_at: `${TODAY}T12:00:00Z` }, // undated -> excluded
+    { id: "nf4", person_id: "n4", kind: "date", content: "Product launch", due_at: `${addDays(TODAY, 1)}T09:00:00Z`, status: "open", owed_by: "me", created_at: `${TODAY}T12:00:00Z` }, // tomorrow
+    { id: "nf5", person_id: "n4", kind: "date", content: "Offsite in Lisbon", due_at: `${addDays(TODAY, 40)}T09:00:00Z`, status: "open", owed_by: "me", created_at: `${TODAY}T12:00:00Z` }, // far -> excluded
   ];
   const nudges = dueNudges(nudgePeople, nudgeFacts, TODAY);
   check("nudge picks exactly the 4 due-today/tomorrow items", nudges.length === 4, `got ${nudges.length}: ${nudges.map((n) => n.text).join(" | ")}`);
@@ -193,15 +195,15 @@ async function main() {
   ];
   // 20:00 UTC on TODAY is 04:00 the NEXT day in Singapore -> genuinely tomorrow.
   const tzFacts: FactRow[] = [
-    { id: "tf1", person_id: "t1", kind: "date", content: "Evening deadline", due_at: `${TODAY}T20:00:00Z`, status: "open", created_at: `${TODAY}T12:00:00Z` },
+    { id: "tf1", person_id: "t1", kind: "date", content: "Evening deadline", due_at: `${TODAY}T20:00:00Z`, status: "open", owed_by: "me", created_at: `${TODAY}T12:00:00Z` },
   ];
   const tzNudges = dueNudges(tzPeople, tzFacts, TODAY);
   check("late-UTC event is bucketed on the owner's day (tomorrow, not today)", tzNudges.length === 1 && tzNudges[0].daysUntil === 1 && tzNudges[0].text === "Evening deadline tomorrow.", `got ${JSON.stringify(tzNudges)}`);
 
   // Unparseable / malformed due dates must be excluded, never crash or mislabel.
   const badFacts: FactRow[] = [
-    { id: "bf1", person_id: "t1", kind: "date", content: "Broken date", due_at: "not-a-date", status: "open", created_at: `${TODAY}T12:00:00Z` },
-    { id: "bf2", person_id: "t1", kind: "commitment", content: "unresolved", due_at: "next Thursday", status: "open", created_at: `${TODAY}T12:00:00Z` },
+    { id: "bf1", person_id: "t1", kind: "date", content: "Broken date", due_at: "not-a-date", status: "open", owed_by: "me", created_at: `${TODAY}T12:00:00Z` },
+    { id: "bf2", person_id: "t1", kind: "commitment", content: "unresolved", due_at: "next Thursday", status: "open", owed_by: "me", created_at: `${TODAY}T12:00:00Z` },
   ];
   let threw = false;
   let badNudges: ReturnType<typeof dueNudges> = [];
@@ -214,14 +216,14 @@ async function main() {
 
   // A fact typed across multiple lines stays one bullet on one line.
   const nlFacts: FactRow[] = [
-    { id: "nl1", person_id: "t1", kind: "commitment", content: "send the deck\nand the signed contract", due_at: `${TODAY}T02:00:00Z`, status: "open", created_at: `${TODAY}T12:00:00Z` },
+    { id: "nl1", person_id: "t1", kind: "commitment", content: "send the deck\nand the signed contract", due_at: `${TODAY}T02:00:00Z`, status: "open", owed_by: "me", created_at: `${TODAY}T12:00:00Z` },
   ];
   const nlMsg = formatNudge(dueNudges(tzPeople, nlFacts, TODAY));
   check("a newline in a fact does not break the one-bullet-per-line layout", !!nlMsg && nlMsg.split("\n").length === 1 && nlMsg.startsWith("• ") && nlMsg.includes("send the deck and the signed contract"), `msg=${JSON.stringify(nlMsg)}`);
 
   // Content ending in punctuation must not double the terminal period.
   const punctFacts: FactRow[] = [
-    { id: "pf1", person_id: "t1", kind: "date", content: "Product launch.", due_at: `${TODAY}T02:00:00Z`, status: "open", created_at: `${TODAY}T12:00:00Z` },
+    { id: "pf1", person_id: "t1", kind: "date", content: "Product launch.", due_at: `${TODAY}T02:00:00Z`, status: "open", owed_by: "me", created_at: `${TODAY}T12:00:00Z` },
   ];
   const punctMsg = formatNudge(dueNudges(tzPeople, punctFacts, TODAY));
   check("trailing punctuation is not doubled", punctMsg === "• Product launch today.", `msg=${JSON.stringify(punctMsg)}`);
@@ -317,7 +319,7 @@ async function main() {
   ];
   const dupFacts: FactRow[] = [
     ...[54, 47, 40].map((d, j) => factDaysAgo("dp1", j, d)),
-    { id: "dp1-owe", person_id: "dp1", kind: "commitment", content: "send the report", due_at: `${TODAY}T09:00:00Z`, status: "open", created_at: `${addDays(TODAY, -40)}T12:00:00Z` },
+    { id: "dp1-owe", person_id: "dp1", kind: "commitment", content: "send the report", due_at: `${TODAY}T09:00:00Z`, status: "open", owed_by: "me", created_at: `${addDays(TODAY, -40)}T12:00:00Z` },
     ...[39, 32, 25].map((d, j) => factDaysAgo("dp2", j, d)),
   ];
   check("without dedup, the most-overdue cooling person (Dawn) is the warm-keep", (topWarmKeep(dupPeople, dupFacts, TODAY) ?? "").includes("Dawn"));
@@ -327,6 +329,56 @@ async function main() {
     cn.items.some((i) => i.personId === "dp1") && !!cn.warmKeep && cn.warmKeep.includes("Fox") && !cn.warmKeep.includes("Dawn"),
     `items=${cn.items.map((i) => i.text).join(" | ")} warm=${cn.warmKeep}`,
   );
+
+  // 12. Ledger of Owes: direction extraction, both-sided ledger, the you-owe
+  //     filter on Today/nudge, and the friendly chase draft.
+  const owes = await mock.extract({
+    text: "Tom will send me the contract next week. I promised to send Priya the deck.",
+    today: TODAY,
+    existingNames: [],
+  });
+  const oweTom = owes.entities.find((e) => e.name === "Tom");
+  const owePriya = owes.entities.find((e) => e.name === "Priya");
+  check("a 'they will send me' promise is a commitment owed_by them", !!oweTom?.facts.some((f) => f.kind === "commitment" && f.owed_by === "them"), `tom=${JSON.stringify(oweTom?.facts)}`);
+  check("an 'I promised to send' is a commitment owed_by me", !!owePriya?.facts.some((f) => f.kind === "commitment" && f.owed_by === "me"), `priya=${JSON.stringify(owePriya?.facts)}`);
+
+  const owePeople: PersonRow[] = [
+    { id: "o1", name: "Ana", company: null, role: null, blurb: null, birthday: null, next_meeting_at: null, last_contact_at: `${TODAY}T12:00:00Z` },
+    { id: "o2", name: "Ben", company: null, role: null, blurb: null, birthday: null, next_meeting_at: null, last_contact_at: `${TODAY}T12:00:00Z` },
+  ];
+  const oweFacts: FactRow[] = [
+    { id: "of1", person_id: "o1", kind: "commitment", content: "send Ana the deck", due_at: `${addDays(TODAY, -3)}T09:00:00Z`, status: "open", owed_by: "me", created_at: `${TODAY}T12:00:00Z` }, // you owe, overdue
+    { id: "of2", person_id: "o1", kind: "commitment", content: "reply to Ana", due_at: `${addDays(TODAY, 2)}T09:00:00Z`, status: "open", owed_by: "me", created_at: `${TODAY}T12:00:00Z` }, // you owe, soon
+    { id: "of3", person_id: "o2", kind: "commitment", content: "the quarter numbers", due_at: `${addDays(TODAY, -1)}T09:00:00Z`, status: "open", owed_by: "them", created_at: `${TODAY}T12:00:00Z` }, // they owe, overdue
+    { id: "of4", person_id: "o2", kind: "commitment", content: "a callback", due_at: null, status: "open", owed_by: "them", created_at: `${TODAY}T12:00:00Z` }, // they owe, undated
+    { id: "of5", person_id: "o1", kind: "commitment", content: "old thing", due_at: null, status: "done", owed_by: "me", created_at: `${TODAY}T12:00:00Z` }, // done -> excluded
+  ];
+  const ledger = buildLedger(owePeople, oweFacts, TODAY);
+  check("ledger splits by direction", ledger.youOwe.length === 2 && ledger.theyOwe.length === 2, `you=${ledger.youOwe.length} they=${ledger.theyOwe.length}`);
+  check("ledger excludes done commitments", ![...ledger.youOwe, ...ledger.theyOwe].some((i) => i.factId === "of5"));
+  check("you-owe is sorted most-overdue first", ledger.youOwe[0].factId === "of1" && ledger.youOwe[0].overdue === true, `order=${ledger.youOwe.map((i) => i.factId).join(",")}`);
+  check("an undated owe sorts to the bottom of its group", ledger.theyOwe[ledger.theyOwe.length - 1].factId === "of4" && ledger.theyOwe[ledger.theyOwe.length - 1].dueLabel === null);
+  check("overdue flag matches the label", ledger.theyOwe.find((i) => i.factId === "of3")?.overdue === true && ledger.theyOwe.find((i) => i.factId === "of3")?.dueLabel === "overdue");
+  const malformedLedger = buildLedger(owePeople, [{ id: "mf1", person_id: "o1", kind: "commitment", content: "broken date owe", due_at: "not-a-date", status: "open", owed_by: "me", created_at: `${TODAY}T12:00:00Z` }], TODAY);
+  check("an unparseable due_at shows no chip (not a literal 'unknown')", malformedLedger.youOwe.length === 1 && malformedLedger.youOwe[0].dueLabel === null && malformedLedger.youOwe[0].daysUntil === null, `got ${JSON.stringify(malformedLedger.youOwe[0])}`);
+
+  // Today + nudge stay one-directional: a they-owe is never a to-do or a nudge.
+  const oweSignals = scout(owePeople, oweFacts, TODAY, 50).filter((s) => s.type === "commitment");
+  check("the commitment signal carries the direction", oweSignals.some((s) => s.type === "commitment" && s.owedBy === "them") && oweSignals.some((s) => s.type === "commitment" && s.owedBy === "me"));
+  const dueTodayFacts: FactRow[] = [
+    { id: "dt1", person_id: "o1", kind: "commitment", content: "send Ana the file", due_at: `${TODAY}T09:00:00Z`, status: "open", owed_by: "me", created_at: `${TODAY}T12:00:00Z` },
+    { id: "dt2", person_id: "o2", kind: "commitment", content: "the sign off", due_at: `${TODAY}T09:00:00Z`, status: "open", owed_by: "them", created_at: `${TODAY}T12:00:00Z` },
+  ];
+  const dueMsg = dueNudges(owePeople, dueTodayFacts, TODAY);
+  check("nudge includes the you-owe due today", dueMsg.some((i) => i.text.includes("send Ana the file")));
+  check("nudge excludes a they-owe (never 'You promised' for what is owed to you)", !dueMsg.some((i) => i.text.includes("sign off")), `msg=${dueMsg.map((i) => i.text).join(" | ")}`);
+
+  // The chase: a warm, anchored reminder that never sounds like chasing.
+  const chaseSignal: Signal = { type: "chase", person: { id: "c1", name: "Dana", company: null, role: null, blurb: null }, item: "the signed contract", dueLabel: null, facts: [], factId: "cf1" };
+  const chaseCard = await mock.buildCard(chaseSignal);
+  check("chase drafts a nudge anchored to the real item", chaseCard.kind === "nudge" && /signed contract/i.test(chaseCard.body));
+  check("chase copy never uses pressure or timing words", !/\b(overdue|late|still waiting|reminder|asap|urgent|owe|behind)\b/i.test(chaseCard.body), `body=${chaseCard.body}`);
+  check("chase copy has no em/en dash", !/[—–]/.test(chaseCard.body + " " + chaseCard.title), `text=${chaseCard.title} | ${chaseCard.body}`);
 
   console.log("");
   if (failures) {

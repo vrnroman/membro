@@ -142,6 +142,7 @@ export async function fileNote(input: CaptureInput): Promise<CaptureResult> {
           kind: f.kind,
           content: f.content,
           due_at: f.due_at ?? null,
+          owed_by: f.kind === "commitment" ? f.owed_by ?? "me" : "me",
           confidence: entity.confidence,
         });
         factCount++;

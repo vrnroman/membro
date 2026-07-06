@@ -80,7 +80,9 @@ function dueNudgesFromSignals(signals: ActionSignal[]): NudgeItem[] {
         d = labelDays(s.whenLabel);
         break;
       case "commitment":
-        d = labelDays(s.dueLabel); // undated promises have no dueLabel -> excluded
+        // Only what the owner OWES is nudged as a to-do; a "they owe me" promise
+        // is chased from the Promises ledger, never rendered as "You promised X".
+        d = s.owedBy === "them" ? null : labelDays(s.dueLabel);
         break;
       case "dated":
         d = s.daysUntil === 0 || s.daysUntil === 1 ? (s.daysUntil as 0 | 1) : null;

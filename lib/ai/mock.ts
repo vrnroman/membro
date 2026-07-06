@@ -28,6 +28,11 @@ const STOP = new Set([
 ]);
 
 const PROMISE = /\b(i'?ll|i will|i promised|promised|i owe|owe|i need to|i'?ve got to|send (him|her|them)|get (him|her|them)|circle back|follow up)\b/i;
+// The other direction: something the OTHER person owes the note-taker. Kept
+// distinct from PROMISE so the Scatter can set owed_by='them' (a they-owe-me),
+// which is the half the Ledger of Owes adds. Deliberately narrow ("...me",
+// "waiting on") so an ambiguous line still falls through to 'me'.
+const THEM_OWES = /\b(owes? me|owe me|will (send|get|share|bring|email|give) me|(gets?|getting) back to me|promised me|waiting (on|for)|still owes?|send me|owe(s|d)? (me|us))\b/i;
 const MOVING = /\b(moving to|relocat\w+ to|joining|transferring to|starting at)\b/i;
 const PREF = /\b(prefers|likes|hates|always|never)\b/i;
 
@@ -67,10 +72,17 @@ function findNames(text: string, existingNames: string[]): string[] {
 }
 
 function classify(sentence: string): ExtractedFact["kind"] {
-  if (PROMISE.test(sentence)) return "commitment";
+  if (PROMISE.test(sentence) || THEM_OWES.test(sentence)) return "commitment";
   if (PREF.test(sentence)) return "preference";
   if (MOVING.test(sentence)) return "fact";
   return "fact";
+}
+
+// Direction of a commitment sentence: 'them' when the other person owes the
+// note-taker, else 'me'. Default 'me' keeps an ambiguous promise from inventing a
+// debt owed to the owner.
+function directionOf(sentence: string): "me" | "them" {
+  return THEM_OWES.test(sentence) ? "them" : "me";
 }
 
 function addDays(today: string, days: number): string {
@@ -123,6 +135,7 @@ export class MockAdapter implements AiAdapter {
         content = content.replace(/[.!?]+$/, "");
 
         const fact: ExtractedFact = { kind, content: capitalize(content) };
+        if (kind === "commitment") fact.owed_by = directionOf(sentence);
         if (/\bnext week\b/i.test(sentence)) fact.due_at = addDays(input.today, 7);
         else if (/\btomorrow\b/i.test(sentence)) fact.due_at = addDays(input.today, 1);
         else if (/\bthursday\b/i.test(sentence)) fact.due_at = addDays(input.today, 3);
@@ -199,6 +212,17 @@ export class MockAdapter implements AiAdapter {
           body: `Hi both, quick intro. ${signal.personA.name}, meet ${signal.personB.name}. You're both connected to ${signal.shared}, so I thought you should know each other. I'll let you two take it from here.`,
           why: `${signal.personA.name} and ${signal.personB.name} are both linked to ${signal.shared}.`,
         };
+      case "chase": {
+        const first = signal.person.name.split(" ")[0];
+        // Warm and no-pressure; never mentions lateness or timing (the item is
+        // anchored, urgency stays internal to sorting).
+        return {
+          kind: "nudge",
+          title: `Follow up with ${signal.person.name} on ${truncate(signal.item, 40)}`,
+          body: `Hi ${first}, hope you're doing well. How's ${signal.item} coming along? No rush at all, just keeping it on my radar.`,
+          why: `${signal.person.name} owes you ${signal.item}.`,
+        };
+      }
     }
   }
 

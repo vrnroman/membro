@@ -45,7 +45,8 @@ export class ClaudeAdapter implements AiAdapter {
       "From a raw note (typed, dictated, or read off a screenshot) extract the PEOPLE mentioned and the durable facts about each one.",
       "One note can mention several people — split the note and route each fragment to the right person (this is the core feature).",
       `Today is ${input.today}; resolve relative dates ("next week", "Thursday") to absolute ISO datetimes in due_at.`,
-      "Fact kinds: 'commitment' = something the NOTE-TAKER promised to do; 'date' = a one-off dated event; 'preference' = how the person likes things; 'fact' = anything else worth remembering.",
+      "Fact kinds: 'commitment' = a promise in EITHER direction (the note-taker owes someone, OR someone owes the note-taker); 'date' = a one-off dated event; 'preference' = how the person likes things; 'fact' = anything else worth remembering.",
+      "For a commitment set owed_by: 'me' when the NOTE-TAKER promised to do something (\"I'll send the deck\", \"I owe her the doc\"), 'them' when the OTHER person owes the note-taker (\"he will send me the contract\", \"she still owes me the numbers\", \"waiting on Tom for the review\"). When it is unclear, use 'me', and never invent a debt owed to the note-taker.",
       "Set birthday only when a birthday is explicitly mentioned. Keep blurb to a short who-they-are line.",
       "confidence is 0..1: 1.0 when the person is unambiguous, lower (~0.5) when the name could collide with someone already known.",
       input.existingNames.length
@@ -194,5 +195,7 @@ function describeSignal(signal: Signal): string {
     }
     case "connector":
       return `Signal: CONNECTOR. ${signal.personA.name} and ${signal.personB.name} are both connected to "${signal.shared}". Facts: ${signal.facts.join("; ") || "none"}. Write a 'connector' card: a short, ready-to-send intro that explains why these two should meet.`;
+    case "chase":
+      return `Signal: CHASE. ${signal.person.name} owes the owner: "${signal.item}". Facts: ${signal.facts.join("; ") || "none"}. Write a 'nudge' card: a short, warm, low-pressure reminder the owner can send to gently follow up, anchored to that specific thing. Assume the best (it is probably just in progress). Do NOT mention lateness or timing and never use words like "overdue", "late", "still waiting", or "reminder"; keep it friendly and no-pressure, e.g. "Hey, how's the contract coming along? No rush."`;
   }
 }

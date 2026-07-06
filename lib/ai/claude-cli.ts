@@ -78,10 +78,11 @@ export class ClaudeCliAdapter implements AiAdapter {
       "You are the memory engine for Membro, a personal CRM for one busy professional.",
       "From the NOTE below, extract the PEOPLE mentioned and the durable facts about each. One note can mention several people; split it and route each fragment to the right person.",
       `Today is ${input.today}; resolve relative dates to absolute ISO datetimes in due_at.`,
-      "Fact kinds: 'commitment' = something the note-taker promised to do; 'date' = a one-off dated event; 'preference' = how the person likes things; 'fact' = anything else.",
+      "Fact kinds: 'commitment' = a promise in EITHER direction (the note-taker owes someone, or someone owes the note-taker); 'date' = a one-off dated event; 'preference' = how the person likes things; 'fact' = anything else.",
+      "For a commitment set owed_by: 'me' when the note-taker owes it (\"I'll send the deck\"), 'them' when the other person owes the note-taker (\"he will send me the contract\", \"waiting on Tom for the review\"). When unsure, use 'me' (never invent a debt owed to the note-taker).",
       "Set birthday only when explicitly mentioned. confidence is 0..1 (lower when a name could collide with someone already known).",
       input.existingNames.length ? `Already on file: ${input.existingNames.join(", ")}.` : "No people on file yet.",
-      'Output ONLY a JSON object, no prose, of shape: {"entities":[{"name":string,"company":string|null,"role":string|null,"blurb":string|null,"birthday":string|null,"confidence":number,"facts":[{"kind":"fact"|"date"|"commitment"|"preference","content":string,"due_at":string|null}]}]}.',
+      'Output ONLY a JSON object, no prose, of shape: {"entities":[{"name":string,"company":string|null,"role":string|null,"blurb":string|null,"birthday":string|null,"confidence":number,"facts":[{"kind":"fact"|"date"|"commitment"|"preference","content":string,"due_at":string|null,"owed_by":"me"|"them"}]}]}.',
       "",
       `NOTE:\n${input.text}`,
     ].join("\n");
@@ -167,5 +168,7 @@ function describeSignal(signal: Signal): string {
     }
     case "connector":
       return `Signal: CONNECTOR. ${signal.personA.name} and ${signal.personB.name} are both connected to "${signal.shared}". Facts: ${signal.facts.join("; ") || "none"}. Write a 'connector': a short ready-to-send intro explaining why they should meet.`;
+    case "chase":
+      return `Signal: CHASE. ${signal.person.name} owes the owner: "${signal.item}". Facts: ${signal.facts.join("; ") || "none"}. Write a 'nudge': a short, warm, low-pressure reminder the owner can send to gently follow up, anchored to that specific thing. Assume the best (probably just in progress). Do NOT mention lateness or timing and never use words like "overdue", "late", "still waiting", or "reminder"; keep it friendly, e.g. "Hey, how's the contract coming along? No rush."`;
   }
 }

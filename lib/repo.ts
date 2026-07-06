@@ -87,7 +87,7 @@ export function deletePerson(id: string): void {
 // ── Facts ───────────────────────────────────────────────────────────────────
 export function listFacts(): FactRow[] {
   return db()
-    .prepare("select id, person_id, kind, content, due_at, status, created_at from facts order by created_at desc")
+    .prepare("select id, person_id, kind, content, due_at, status, owed_by, created_at from facts order by created_at desc")
     .all() as FactRow[];
 }
 
@@ -97,13 +97,14 @@ export type FactDetail = {
   content: string;
   due_at: string | null;
   status: FactRow["status"];
+  owed_by: FactRow["owed_by"];
   created_at: string;
 };
 
 export function listFactsForPerson(personId: string): FactDetail[] {
   return db()
     .prepare(
-      "select id, kind, content, due_at, status, created_at from facts where person_id = ? order by created_at desc",
+      "select id, kind, content, due_at, status, owed_by, created_at from facts where person_id = ? order by created_at desc",
     )
     .all(personId) as FactDetail[];
 }
@@ -121,12 +122,13 @@ export function insertFact(f: {
   kind?: FactRow["kind"];
   content: string;
   due_at?: string | null;
+  owed_by?: FactRow["owed_by"];
   confidence?: number;
 }): void {
   db()
     .prepare(
-      `insert into facts (id, person_id, kind, content, due_at, confidence, created_at)
-       values (@id, @person_id, @kind, @content, @due_at, @confidence, @created_at)`,
+      `insert into facts (id, person_id, kind, content, due_at, owed_by, confidence, created_at)
+       values (@id, @person_id, @kind, @content, @due_at, @owed_by, @confidence, @created_at)`,
     )
     .run({
       id: randomUUID(),
@@ -134,14 +136,44 @@ export function insertFact(f: {
       kind: f.kind ?? "fact",
       content: f.content,
       due_at: f.due_at ?? null,
+      owed_by: f.owed_by ?? "me",
       confidence: f.confidence ?? 1,
       created_at: now(),
     });
   markBriefStale(f.person_id); // a new fact makes this person's Pre-Read out of date
 }
 
-export function updateFactStatus(id: string, status: "open" | "done"): void {
-  db().prepare("update facts set status = ? where id = ?").run(status, id);
+export function getFact(id: string): FactRow | null {
+  return (
+    db()
+      .prepare("select id, person_id, kind, content, due_at, status, owed_by, created_at from facts where id = ?")
+      .get(id) as FactRow
+  ) ?? null;
+}
+
+// Patch a fact's status (done), due_at (snooze), and/or direction (flip me<->them).
+// Any subset; a no-op if nothing valid is given. Marks the person's Pre-Read stale
+// like the other fact mutators, since a closed/snoozed/flipped owe changes the read.
+export function updateFact(
+  id: string,
+  patch: { status?: "open" | "done"; due_at?: string | null; owed_by?: FactRow["owed_by"] },
+): void {
+  const sets: string[] = [];
+  const args: Record<string, unknown> = { __id: id };
+  if (patch.status !== undefined) {
+    sets.push("status = @status");
+    args.status = patch.status;
+  }
+  if (patch.due_at !== undefined) {
+    sets.push("due_at = @due_at");
+    args.due_at = patch.due_at;
+  }
+  if (patch.owed_by !== undefined) {
+    sets.push("owed_by = @owed_by");
+    args.owed_by = patch.owed_by;
+  }
+  if (sets.length === 0) return;
+  db().prepare(`update facts set ${sets.join(", ")} where id = @__id`).run(args);
   const row = db().prepare("select person_id from facts where id = ?").get(id) as { person_id: string } | undefined;
   if (row) markBriefStale(row.person_id);
 }
@@ -195,7 +227,12 @@ export function listCards(): Card[] {
 }
 
 export function deletePendingCards(): void {
-  db().prepare("delete from cards where status = 'pending'").run();
+  // Clear the night shift's own pending drafts before it regenerates them, but
+  // SPARE user-initiated chase drafts: those are not regenerable (the night shift
+  // never rebuilds them) and the owner is mid-review of them here and on Suggestions.
+  db()
+    .prepare("delete from cards where status = 'pending' and coalesce(json_extract(meta, '$.signal'), '') != 'chase'")
+    .run();
 }
 
 export function insertCards(
@@ -232,6 +269,41 @@ export function insertCards(
 export function updateCard(id: string, patch: { status?: Card["status"]; body?: string }): void {
   if (patch.status !== undefined) db().prepare("update cards set status = ? where id = ?").run(patch.status, id);
   if (patch.body !== undefined) db().prepare("update cards set body = ? where id = ?").run(patch.body, id);
+}
+
+// Write (or replace) the "chase" reminder card for a they-owe-me fact. Rerun-safe:
+// tapping "Draft a reminder" twice replaces the prior draft for that fact rather
+// than stacking duplicates, keyed on meta.source_fact_id + the chase tag. The card
+// is a plain pending 'nudge' (no new card kind, no CHECK migration) reviewed like
+// any other; meta.source_fact_id also lets deleteFact clean it up when the owe goes.
+export function replaceChaseCard(row: {
+  person_id: string | null;
+  factId: string;
+  title: string;
+  body: string;
+  why: string | null;
+}): string {
+  const id = randomUUID();
+  const d = db();
+  const tx = d.transaction(() => {
+    d.prepare(
+      "delete from cards where json_extract(meta, '$.source_fact_id') = ? and json_extract(meta, '$.signal') = 'chase'",
+    ).run(row.factId);
+    d.prepare(
+      `insert into cards (id, person_id, kind, title, body, why, meta, created_at)
+       values (@id, @pid, 'nudge', @title, @body, @why, @meta, @ts)`,
+    ).run({
+      id,
+      pid: row.person_id,
+      title: row.title,
+      body: row.body,
+      why: row.why,
+      meta: JSON.stringify({ signal: "chase", source_fact_id: row.factId }),
+      ts: now(),
+    });
+  });
+  tx();
+  return id;
 }
 
 // ── Assists (the assistant's per-note drafts / advisories) ────────────────────

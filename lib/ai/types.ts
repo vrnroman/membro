@@ -8,6 +8,10 @@ export type ExtractedFact = {
   kind: FactKind;
   content: string;
   due_at?: string | null; // ISO datetime, for commitments and dated facts
+  // Direction of a commitment: 'me' = the note-taker owes them, 'them' = they owe
+  // the note-taker. Only meaningful for kind='commitment'; default 'me' when
+  // unsure, so an ambiguous promise never invents a debt someone owes you.
+  owed_by?: "me" | "them";
 };
 
 export type ExtractedEntity = {
@@ -87,11 +91,15 @@ export type PersonLite = {
 
 export type Signal =
   | { type: "birthday"; person: PersonLite; daysUntil: number; facts: string[] }
-  | { type: "commitment"; person: PersonLite; commitment: string; dueLabel: string | null; facts: string[]; factId?: string }
+  | { type: "commitment"; person: PersonLite; commitment: string; dueLabel: string | null; owedBy: "me" | "them"; facts: string[]; factId?: string }
   | { type: "meeting"; person: PersonLite; whenLabel: string; facts: string[] }
   | { type: "dated"; person: PersonLite; event: string; whenLabel: string; daysUntil: number; facts: string[]; factId?: string }
   | { type: "cold"; person: PersonLite; daysSince: number; cadenceDays: number | null; facts: string[] }
-  | { type: "connector"; personA: PersonLite; personB: PersonLite; shared: string; facts: string[] };
+  | { type: "connector"; personA: PersonLite; personB: PersonLite; shared: string; facts: string[] }
+  // Not emitted by the Scout: built on demand when the owner taps "Draft a
+  // reminder" on an overdue they-owe-me item. The Builder turns it into a light,
+  // friendly nudge (a 'nudge' card), review-only like every other draft.
+  | { type: "chase"; person: PersonLite; item: string; dueLabel: string | null; facts: string[]; factId?: string };
 
 export type BuiltCard = {
   kind: "connector" | "nudge" | "brief";
@@ -138,6 +146,7 @@ export const EXTRACTION_SCHEMA = {
                 kind: { type: "string", enum: ["fact", "date", "commitment", "preference"] },
                 content: { type: "string" },
                 due_at: { type: ["string", "null"] },
+                owed_by: { type: "string", enum: ["me", "them"] },
               },
               required: ["kind", "content"],
             },

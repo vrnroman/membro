@@ -1,4 +1,8 @@
 import { execFile } from "node:child_process";
+import { writeFile, unlink } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { randomUUID } from "node:crypto";
 import {
   AiAdapter,
   AssistContextPerson,
@@ -28,11 +32,11 @@ function enqueue<T>(fn: () => Promise<T>): Promise<T> {
   return run as Promise<T>;
 }
 
-function runClaude(prompt: string): Promise<string> {
+function runClaude(prompt: string, extraArgs: string[] = []): Promise<string> {
   return enqueue(
     () =>
       new Promise<string>((resolve, reject) => {
-        const args = ["-p", prompt, "--output-format", "json"];
+        const args = ["-p", prompt, "--output-format", "json", ...extraArgs];
         if (MODEL) args.push("--model", MODEL);
         execFile(
           BIN,
@@ -56,6 +60,23 @@ function runClaude(prompt: string): Promise<string> {
   );
 }
 
+// Browser media type -> file extension, so the temp file the CLI reads has an
+// extension its Read tool recognizes. iOS Safari uploads photos as image/jpeg;
+// screenshots are usually image/png. Unknown/absent falls back to png.
+function extForMedia(mediaType?: string): string {
+  switch ((mediaType || "").toLowerCase()) {
+    case "image/jpeg":
+    case "image/jpg":
+      return "jpg";
+    case "image/webp":
+      return "webp";
+    case "image/gif":
+      return "gif";
+    default:
+      return "png";
+  }
+}
+
 // Pull a JSON object out of the model's text (it may wrap it in a code fence).
 function parseJsonObject<T>(text: string): T {
   const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/);
@@ -69,23 +90,54 @@ function parseJsonObject<T>(text: string): T {
 export class ClaudeCliAdapter implements AiAdapter {
   readonly label = "claude-cli";
 
-  async extract(input: { text: string; today: string; existingNames: string[]; imageBase64?: string }): Promise<ExtractionResult> {
-    if (!input.text && input.imageBase64) {
-      // The CLI path does not handle inline base64 images; skip rather than guess.
-      return { entities: [] };
-    }
-    const prompt = [
+  async extract(input: {
+    text: string;
+    today: string;
+    existingNames: string[];
+    imageBase64?: string;
+    imageMediaType?: string;
+  }): Promise<ExtractionResult> {
+    // Shared extraction instructions, reused by the text and photo paths.
+    const instructions = [
       "You are the memory engine for Membro, a personal CRM for one busy professional.",
-      "From the NOTE below, extract the PEOPLE mentioned and the durable facts about each. One note can mention several people; split it and route each fragment to the right person.",
+      "Extract the PEOPLE mentioned and the durable facts about each. One note can mention several people; split it and route each fragment to the right person.",
       `Today is ${input.today}; resolve relative dates to absolute ISO datetimes in due_at.`,
       "Fact kinds: 'commitment' = a promise in EITHER direction (the note-taker owes someone, or someone owes the note-taker); 'date' = a one-off dated event; 'preference' = how the person likes things; 'fact' = anything else.",
       "For a commitment set owed_by: 'me' when the note-taker owes it (\"I'll send the deck\"), 'them' when the other person owes the note-taker (\"he will send me the contract\", \"waiting on Tom for the review\"). When unsure, use 'me' (never invent a debt owed to the note-taker).",
       "Set birthday only when explicitly mentioned. confidence is 0..1 (lower when a name could collide with someone already known).",
       input.existingNames.length ? `Already on file: ${input.existingNames.join(", ")}.` : "No people on file yet.",
       'Output ONLY a JSON object, no prose, of shape: {"entities":[{"name":string,"company":string|null,"role":string|null,"blurb":string|null,"birthday":string|null,"confidence":number,"facts":[{"kind":"fact"|"date"|"commitment"|"preference","content":string,"due_at":string|null,"owed_by":"me"|"them"}]}]}.',
-      "",
-      `NOTE:\n${input.text}`,
-    ].join("\n");
+    ];
+
+    // Photo capture: the CLI can't take an inline base64 image, but it CAN read an
+    // image file with its Read tool. Write the photo to a temp file, point the run
+    // at it (pre-approving Read and whitelisting the temp dir so there is no
+    // permission prompt in -p mode), then clean up. This is what makes snapping a
+    // photo of an email actually file people and facts instead of silently nothing.
+    if (input.imageBase64) {
+      const dir = tmpdir();
+      const path = join(dir, `membro-capture-${randomUUID()}.${extForMedia(input.imageMediaType)}`);
+      await writeFile(path, Buffer.from(input.imageBase64, "base64"));
+      try {
+        const prompt = [
+          ...instructions,
+          "",
+          "The note is a PHOTO — a screenshot or an email. Use your Read tool to open the image file at the path below, then extract the people and facts from what it shows.",
+          input.text.trim() ? `The owner also typed this alongside the photo (use it as context):\n${input.text}` : "",
+          "",
+          `IMAGE PATH: ${path}`,
+        ]
+          .filter(Boolean)
+          .join("\n");
+        return parseJsonObject<ExtractionResult>(
+          await runClaude(prompt, ["--allowedTools", "Read", "--add-dir", dir]),
+        );
+      } finally {
+        await unlink(path).catch(() => {}); // never leave the photo on disk
+      }
+    }
+
+    const prompt = [...instructions, "", `NOTE:\n${input.text}`].join("\n");
     return parseJsonObject<ExtractionResult>(await runClaude(prompt));
   }
 

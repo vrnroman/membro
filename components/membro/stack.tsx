@@ -14,6 +14,10 @@ export type StackItem = {
   body: string;
   why: string | null;
   status: "pending" | "approved" | "skipped";
+  // Which crew member produced this (e.g. 'researcher'). When present it drives the
+  // pill label/color, so a Researcher brief reads as "Background" even though it is
+  // stored as an 'advisory'-kind row (zero-migration home).
+  meta?: Record<string, unknown>;
 };
 
 export function Stack({
@@ -66,16 +70,19 @@ export function Stack({
 
   return (
     <div className="flex flex-col gap-3">
-      {items.map((item) => (
+      {items.map((item) => {
+        // A crew stamp (meta.crew) wins over the kind for the pill, so a Researcher
+        // brief reads as "Background" with its own color; everything else falls back
+        // to the kind label/color it always used.
+        const crew = typeof item.meta?.crew === "string" ? (item.meta.crew as string) : undefined;
+        const pillLabel = (crew && CREW_LABELS[crew]) ?? labels[item.kind] ?? item.kind;
+        const pillClass = (crew && CREW_CLASSES[crew]) ?? classes[item.kind] ?? "bg-muted text-muted-foreground";
+        return (
         <div key={item.id} className="rounded-2xl border bg-card p-4 shadow-sm">
           <div className="flex items-start justify-between gap-3">
             <div>
-              <span
-                className={`inline-block rounded-full px-2 py-0.5 text-xs font-medium ${
-                  classes[item.kind] ?? "bg-muted text-muted-foreground"
-                }`}
-              >
-                {labels[item.kind] ?? item.kind}
+              <span className={`inline-block rounded-full px-2 py-0.5 text-xs font-medium ${pillClass}`}>
+                {pillLabel}
               </span>
               <h3 className="mt-2 font-medium leading-snug">{item.title}</h3>
             </div>
@@ -146,7 +153,8 @@ export function Stack({
             )}
           </div>
         </div>
-      ))}
+        );
+      })}
     </div>
   );
 }
@@ -169,4 +177,14 @@ export const ASSIST_LABELS: Record<string, string> = {
 export const ASSIST_CLASSES: Record<string, string> = {
   draft: "bg-sky-100 text-sky-700 dark:bg-sky-950 dark:text-sky-300",
   advisory: "bg-violet-100 text-violet-700 dark:bg-violet-950 dark:text-violet-300",
+};
+
+// Crew-member stamps. Keyed by meta.crew, these override the kind label/color when
+// set. Only the Researcher needs one today (its brief is stored as an 'advisory'
+// row); the pill names the OUTPUT ("Background"), not the job, per the house taste.
+export const CREW_LABELS: Record<string, string> = {
+  researcher: "Background",
+};
+export const CREW_CLASSES: Record<string, string> = {
+  researcher: "bg-teal-100 text-teal-700 dark:bg-teal-950 dark:text-teal-300",
 };

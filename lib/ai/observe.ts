@@ -1,6 +1,17 @@
 import { startObservation } from "@langfuse/tracing";
 import { langfuseEnabled } from "@/lib/observability/langfuse";
-import { AiAdapter, AssistOutput, BriefContent, BriefInput, BuiltCard, ExtractionResult, Signal } from "./types";
+import {
+  AiAdapter,
+  AssistOutput,
+  BriefContent,
+  BriefInput,
+  BuiltCard,
+  ExtractionResult,
+  FactConflict,
+  FactRef,
+  ResearchBrief,
+  Signal,
+} from "./types";
 
 // Wrap any AiAdapter so each call shows up in Langfuse as a generation with its
 // input, output, the engine used (mock / claude / claude-cli), and errors. The
@@ -71,6 +82,43 @@ export function observed(adapter: AiAdapter): AiAdapter {
       try {
         const out = await adapter.assist(input);
         gen.update({ output: out, metadata: { adapter: adapter.label, kind: out.kind } }).end();
+        return out;
+      } catch (e) {
+        gen.update({ level: "ERROR", statusMessage: (e as Error).message }).end();
+        throw e;
+      }
+    },
+
+    async detectConflicts(input: {
+      personName: string;
+      newFacts: FactRef[];
+      existingFacts: FactRef[];
+      today: string;
+    }): Promise<FactConflict[]> {
+      const gen = startObservation(
+        "membro.detectConflicts",
+        { model, input: { person: input.personName, newFacts: input.newFacts.map((f) => f.content), existing: input.existingFacts.length } },
+        { asType: "generation" },
+      );
+      try {
+        const out = await adapter.detectConflicts(input);
+        gen.update({ output: out, metadata: { adapter: adapter.label, conflicts: out.length } }).end();
+        return out;
+      } catch (e) {
+        gen.update({ level: "ERROR", statusMessage: (e as Error).message }).end();
+        throw e;
+      }
+    },
+
+    async research(input: { note: string; today: string; knownSubjects: string[] }): Promise<ResearchBrief[]> {
+      const gen = startObservation(
+        "membro.research",
+        { model, input: { note: input.note, knownSubjects: input.knownSubjects } },
+        { asType: "generation" },
+      );
+      try {
+        const out = await adapter.research(input);
+        gen.update({ output: out, metadata: { adapter: adapter.label, briefs: out.length } }).end();
         return out;
       } catch (e) {
         gen.update({ level: "ERROR", statusMessage: (e as Error).message }).end();

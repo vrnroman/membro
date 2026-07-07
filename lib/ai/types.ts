@@ -50,6 +50,24 @@ export type AssistOutput = {
 // ground a reply in real facts instead of writing from a blank page.
 export type AssistContextPerson = { name: string; facts: string[] };
 
+// Ledger Catch. When a freshly filed fact ACTIVELY negates one already on file
+// ("prefers tea" then "hates coffee now, switched to espresso"), the Ledger crew
+// member flags the collision so the owner picks which is true now. A minimal fact
+// reference (id + the exact captured text) is all the compare pass needs.
+export type FactRef = { id: string; content: string };
+
+// One flagged collision: a NEW fact that contradicts an OLD one, with a one-line,
+// non-accusatory reason. Ids reference the rows so the resolver knows which to keep.
+export type FactConflict = { newFactId: string; oldFactId: string; reason: string };
+
+// Per-note crew, the Researcher member. When a note names a company / org / topic
+// the owner has never logged, the Researcher leaves a one-paragraph, web-grounded
+// brief: `subject` is what it is about, `body` is the paragraph (one current fact +
+// a why-now tie-back to the note), `why` is the one-line reason it surfaced. Returns
+// an empty list when nothing is worth briefing (a household name, a thin result, an
+// ambiguous mention) — silence is a first-class result.
+export type ResearchBrief = { subject: string; body: string; why: string };
+
 // Pre-Read. The prep "brief" is no longer a wall of prose you read on a click;
 // it is a decision aid, computed in the background and shown the instant a person
 // is opened. Three scannable blocks:
@@ -115,6 +133,13 @@ export interface AiAdapter {
   brief(input: BriefInput): Promise<BriefContent>;
   // Per-note assistant: classify a freshly captured note and start the work.
   assist(input: { note: string; today: string; people: AssistContextPerson[] }): Promise<AssistOutput>;
+  // Ledger Catch: flag any newly-filed fact that ACTIVELY contradicts one already
+  // on file for the same person. Conservative by design — returns [] unless a real
+  // negation is present (never a mere addition or an evolution over time).
+  detectConflicts(input: { personName: string; newFacts: FactRef[]; existingFacts: FactRef[]; today: string }): Promise<FactConflict[]>;
+  // Per-note crew, the Researcher: leave a short web-grounded brief for any company
+  // or topic the note names that the owner has never logged. [] when nothing warrants it.
+  research(input: { note: string; today: string; knownSubjects: string[] }): Promise<ResearchBrief[]>;
   // Diary reflection: a short memo over the owner's own recent entries.
   reflect(entries: string[], today: string): Promise<string>;
 }
@@ -193,3 +218,77 @@ export const ASSIST_SCHEMA = {
   },
   required: ["kind", "title", "body", "why"],
 } as const;
+
+export const CONFLICTS_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    conflicts: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          newFactId: { type: "string" },
+          oldFactId: { type: "string" },
+          reason: { type: "string" },
+        },
+        required: ["newFactId", "oldFactId", "reason"],
+      },
+    },
+  },
+  required: ["conflicts"],
+} as const;
+
+// The Researcher's web-search path can't combine a server tool with strict
+// json_schema output, so it parses JSON from the model's prose instead of using a
+// schema here (hence no RESEARCH_SCHEMA constant).
+
+// Shared post-processing for the two new crew calls, used by every real adapter so
+// a model's output is cleaned the same way regardless of engine.
+
+// Keep only conflicts whose ids the model actually got from the input (never a
+// hallucinated pair) and drop any self-pair or duplicate. The resolver acts on
+// these ids, so a stray id must never reach the DB.
+export function sanitizeConflicts(
+  conflicts: FactConflict[] | undefined,
+  newFacts: FactRef[],
+  existingFacts: FactRef[],
+): FactConflict[] {
+  if (!Array.isArray(conflicts)) return [];
+  const newIds = new Set(newFacts.map((f) => f.id));
+  const oldIds = new Set(existingFacts.map((f) => f.id));
+  const seen = new Set<string>();
+  const out: FactConflict[] = [];
+  for (const c of conflicts) {
+    if (!c || typeof c.newFactId !== "string" || typeof c.oldFactId !== "string") continue;
+    if (!newIds.has(c.newFactId) || !oldIds.has(c.oldFactId)) continue;
+    if (c.newFactId === c.oldFactId) continue;
+    const key = `${c.newFactId}:${c.oldFactId}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push({ newFactId: c.newFactId, oldFactId: c.oldFactId, reason: (c.reason || "").trim() });
+  }
+  return out;
+}
+
+// Drop briefs with an empty subject/body or one that is actually on file (a
+// belt-and-suspenders check on top of the prompt's "do not brief these"), and cap
+// the count so one note never floods the review list.
+export function sanitizeBriefs(briefs: ResearchBrief[] | undefined, knownSubjects: string[]): ResearchBrief[] {
+  if (!Array.isArray(briefs)) return [];
+  const known = new Set(knownSubjects.map((s) => s.trim().toLowerCase()));
+  const seen = new Set<string>();
+  const out: ResearchBrief[] = [];
+  for (const b of briefs) {
+    if (!b || typeof b.subject !== "string" || typeof b.body !== "string") continue;
+    const subject = b.subject.trim();
+    const body = b.body.trim();
+    if (!subject || !body) continue;
+    const key = subject.toLowerCase();
+    if (known.has(key) || seen.has(key)) continue;
+    seen.add(key);
+    out.push({ subject, body, why: (b.why || "").trim() });
+  }
+  return out.slice(0, 3);
+}

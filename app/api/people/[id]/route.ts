@@ -1,5 +1,12 @@
 import { NextResponse } from "next/server";
-import { getPerson, listFactsForPerson, getBrief, updatePerson, deletePerson } from "@/lib/repo";
+import {
+  getPerson,
+  listFactsForPerson,
+  listPendingConflictsForPerson,
+  getBrief,
+  updatePerson,
+  deletePerson,
+} from "@/lib/repo";
 import { parseBrief } from "@/lib/briefs/generate";
 
 export const runtime = "nodejs";
@@ -14,7 +21,11 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
   const row = getBrief(id);
   const brief = row ? parseBrief(row.body) : null;
   const briefMeta = row ? { generatedAt: row.generated_at, stale: !!row.stale } : null;
-  return NextResponse.json({ person, facts: listFactsForPerson(id), brief, briefMeta });
+  // Pending contradictions ride along too, so the profile can show the quiet
+  // "possible contradiction" review without a second round-trip. Empty most of the
+  // time; the profile renders nothing then.
+  const conflicts = listPendingConflictsForPerson(id);
+  return NextResponse.json({ person, facts: listFactsForPerson(id), brief, briefMeta, conflicts });
 }
 
 export async function PATCH(req: Request, { params }: { params: Promise<{ id: string }> }) {

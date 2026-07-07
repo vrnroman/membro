@@ -9,8 +9,14 @@ import {
   BRIEF_SCHEMA,
   BuiltCard,
   CARD_SCHEMA,
+  CONFLICTS_SCHEMA,
   EXTRACTION_SCHEMA,
   ExtractionResult,
+  FactConflict,
+  FactRef,
+  ResearchBrief,
+  sanitizeBriefs,
+  sanitizeConflicts,
   Signal,
 } from "./types";
 
@@ -28,6 +34,26 @@ function firstText(message: Anthropic.Message): string {
     if (block.type === "text") return block.text;
   }
   return "";
+}
+
+// Concatenate every text block. Used when a tool (web search) ran, so the final
+// JSON answer may follow tool blocks rather than being the first block.
+function allText(message: Anthropic.Message): string {
+  return message.content
+    .filter((b): b is Anthropic.TextBlock => b.type === "text")
+    .map((b) => b.text)
+    .join("\n");
+}
+
+// Pull a JSON object out of free text (the web-search path can't use strict
+// json_schema output, so the model returns JSON inside its prose).
+function parseJsonLoose<T>(text: string): T {
+  const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/);
+  const body = fenced ? fenced[1] : text;
+  const start = body.indexOf("{");
+  const end = body.lastIndexOf("}");
+  if (start === -1 || end === -1) throw new Error("no JSON object in model output");
+  return JSON.parse(body.slice(start, end + 1)) as T;
 }
 
 export class ClaudeAdapter implements AiAdapter {
@@ -159,6 +185,66 @@ export class ClaudeAdapter implements AiAdapter {
     } as Anthropic.MessageCreateParamsNonStreaming);
 
     return JSON.parse(firstText(message)) as AssistOutput;
+  }
+
+  async detectConflicts(input: {
+    personName: string;
+    newFacts: FactRef[];
+    existingFacts: FactRef[];
+    today: string;
+  }): Promise<FactConflict[]> {
+    if (!input.newFacts.length || !input.existingFacts.length) return [];
+    const system = [
+      "You are Membro's Ledger member. The owner just filed new facts about a person. Find ONLY the cases where a NEW fact ACTIVELY contradicts an existing one, so an old note is no longer true.",
+      "A contradiction means the new statement negates or replaces the old (\"prefers tea\" then \"can't stand tea now, only coffee\"; \"vegetarian\" then \"back on steak\"). It is NOT a contradiction when the new fact merely ADDS information, covers a DIFFERENT attribute, or when both can be true at once (liking tea AND owning an espresso machine). A plain change over time that is self-explanatory (\"left Acme, now at Globex\") is an update, not a collision. When unsure, do NOT flag it.",
+      "Use the exact ids given in brackets. reason is one short, non-accusatory line.",
+      `Today is ${input.today}. Person: ${input.personName}.`,
+    ].join("\n");
+    const user = [
+      `NEW facts:\n${input.newFacts.map((f) => `- [${f.id}] ${f.content}`).join("\n")}`,
+      `EXISTING facts:\n${input.existingFacts.map((f) => `- [${f.id}] ${f.content}`).join("\n")}`,
+    ].join("\n\n");
+
+    const message = await client().messages.create({
+      model: MODEL,
+      max_tokens: 1024,
+      system,
+      messages: [{ role: "user", content: user }],
+      output_config: { format: { type: "json_schema", schema: CONFLICTS_SCHEMA } },
+    } as Anthropic.MessageCreateParamsNonStreaming);
+
+    const parsed = JSON.parse(firstText(message)) as { conflicts?: FactConflict[] };
+    return sanitizeConflicts(parsed.conflicts, input.newFacts, input.existingFacts);
+  }
+
+  async research(input: { note: string; today: string; knownSubjects: string[] }): Promise<ResearchBrief[]> {
+    if (!input.note.trim()) return [];
+    const known = input.knownSubjects.length ? input.knownSubjects.join(", ") : "(nothing on file yet)";
+    const system = [
+      "You are Membro's Researcher, one of a small crew that reads every note the owner captures. If the note names a company, organization, product, or topic the owner has NEVER logged and that is genuinely worth knowing, web-search it and leave ONE short, current brief.",
+      "Each brief must carry one concrete, CURRENT fact (recent funding, a leadership change, a launch, a notable recent event) plus a one-line tie-back to why it matters right now given the note. Never write founding-year filler, mission-statement language, or an About-page paragraph. Keep each body to 2-4 plain sentences, the owner's voice, no em-dashes.",
+      "Stay SILENT (empty list) for household names the owner obviously knows, anything already on file, an ambiguous or joking mention, or when the search turns up nothing substantive.",
+      `Today is ${input.today}. Already on file, do NOT brief these: ${known}.`,
+      'Output ONLY a JSON object: {"briefs":[{"subject":string,"body":string,"why":string}]}. Empty array if nothing is worth briefing.',
+    ].join("\n");
+
+    // The web_search server tool can't be combined with strict json_schema output,
+    // so we ask for JSON in prose and parse it out. Best-effort: an unparseable
+    // answer just yields no briefs rather than failing the note's crew run.
+    const message = await client().messages.create({
+      model: MODEL,
+      max_tokens: 1500,
+      system,
+      messages: [{ role: "user", content: `NOTE:\n${input.note}` }],
+      tools: [{ type: "web_search_20250305", name: "web_search", max_uses: 5 }],
+    } as Anthropic.MessageCreateParamsNonStreaming);
+
+    try {
+      const parsed = parseJsonLoose<{ briefs?: ResearchBrief[] }>(allText(message));
+      return sanitizeBriefs(parsed.briefs, input.knownSubjects);
+    } catch {
+      return [];
+    }
   }
 
   async reflect(entries: string[], today: string): Promise<string> {

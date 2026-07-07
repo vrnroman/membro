@@ -7,7 +7,7 @@ import {
 } from "@/lib/repo";
 import { getAdapter } from "@/lib/ai";
 import { ExtractedEntity } from "@/lib/ai/types";
-import { enqueueAssistJob } from "@/lib/assist/queue";
+import { enqueueAssistJob, type CrewFacts } from "@/lib/assist/queue";
 import { localToday } from "@/lib/today";
 
 // The capture core: turn a note (typed, transcribed voice, or a photo) into
@@ -77,19 +77,12 @@ export async function fileNote(input: CaptureInput): Promise<CaptureResult> {
   // Keep the raw input for audit / show-the-work.
   const captureId = insertCapture(text || "(image)", sourceType);
 
-  // Hand the note to the assistant to start any work it warrants (a draft, a
-  // situation read, a diary entry). Async and best-effort: a note is saved
-  // regardless, and the queue only carries text notes (an image has none yet).
-  if (text.trim()) {
-    try {
-      enqueueAssistJob({ captureId, note: text.trim(), firstAttemptAt: new Date().toISOString() });
-    } catch {
-      /* never let the assistant queue block a capture from landing */
-    }
-  }
-
   const landed: CaptureResult["landed"] = [];
   const ambiguous: CaptureResult["ambiguous"] = [];
+  // The facts this note filed, per person, so the crew's Ledger member can check
+  // them against what was already on file. Accumulated across the loop, then handed
+  // to the queue once at the end.
+  const crewByPerson = new Map<string, string[]>();
 
   for (const entity of extraction.entities) {
     if (entity.confidence < CONFIDENCE_GATE) {
@@ -124,20 +117,26 @@ export async function fileNote(input: CaptureInput): Promise<CaptureResult> {
       people.push(person);
       created = true;
     } else {
-      // Touch last_contact and fill in any blanks we just learned.
-      const patch: Record<string, unknown> = { last_contact_at: new Date().toISOString() };
-      if (entity.company) patch.company = entity.company;
-      if (entity.role) patch.role = entity.role;
-      if (entity.blurb) patch.blurb = entity.blurb;
-      const birthday = normalizeBirthday(entity.birthday, today);
-      if (birthday) patch.birthday = birthday;
-      updatePerson(person.id, patch);
+      // Touch last_contact and fill in any blanks we just learned. Guarded so a
+      // transient write error here (e.g. a busy DB) never aborts the whole loop and
+      // skips the crew enqueue at the end; the facts still land below.
+      try {
+        const patch: Record<string, unknown> = { last_contact_at: new Date().toISOString() };
+        if (entity.company) patch.company = entity.company;
+        if (entity.role) patch.role = entity.role;
+        if (entity.blurb) patch.blurb = entity.blurb;
+        const birthday = normalizeBirthday(entity.birthday, today);
+        if (birthday) patch.birthday = birthday;
+        updatePerson(person.id, patch);
+      } catch {
+        /* keep filing facts + enqueue the crew even if the profile touch fails */
+      }
     }
 
     let factCount = 0;
     for (const f of entity.facts) {
       try {
-        insertFact({
+        const factId = insertFact({
           person_id: person.id,
           kind: f.kind,
           content: f.content,
@@ -146,12 +145,30 @@ export async function fileNote(input: CaptureInput): Promise<CaptureResult> {
           confidence: entity.confidence,
         });
         factCount++;
+        const ids = crewByPerson.get(person.id) ?? [];
+        ids.push(factId);
+        crewByPerson.set(person.id, ids);
       } catch {
         /* skip a single bad fact, keep the rest */
       }
     }
 
     landed.push({ person: person.name, created, facts: factCount });
+  }
+
+  // Hand the note to the per-note crew once, after the facts have landed. The crew
+  // drafts / advises / diaries the text (a note is saved regardless), the Researcher
+  // web-searches any new company it names, and the Ledger member checks the facts
+  // just filed for contradictions. Enqueued whenever there is text OR facts to
+  // check, so a photo-only note still gets the Ledger pass. Best-effort: a queue
+  // hiccup never blocks a capture from landing.
+  const crewFacts: CrewFacts[] = [...crewByPerson.entries()].map(([personId, factIds]) => ({ personId, factIds }));
+  if (text.trim() || crewFacts.length) {
+    try {
+      enqueueAssistJob({ captureId, note: text.trim(), firstAttemptAt: new Date().toISOString(), crewFacts });
+    } catch {
+      /* never let the crew queue block a capture from landing */
+    }
   }
 
   return { landed, ambiguous, adapter: adapter.label };

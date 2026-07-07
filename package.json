@@ -7,8 +7,9 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint .",
-    "test": "tsx tests/pipeline.ts && tsx tests/briefs.ts && tsx tests/ledger.ts",
+    "test": "tsx tests/pipeline.ts && tsx tests/briefs.ts && tsx tests/ledger.ts && tsx tests/crew.ts",
     "test:ledger": "tsx tests/ledger.ts",
+    "test:crew": "tsx tests/crew.ts",
     "test:langfuse": "tsx tests/langfuse-smoke.ts",
     "gen:icons": "node scripts/generate-icons.mjs"
   },

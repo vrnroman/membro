@@ -11,6 +11,11 @@ import {
   BriefInput,
   BuiltCard,
   ExtractionResult,
+  FactConflict,
+  FactRef,
+  ResearchBrief,
+  sanitizeBriefs,
+  sanitizeConflicts,
   Signal,
 } from "./types";
 
@@ -191,6 +196,45 @@ export class ClaudeCliAdapter implements AiAdapter {
       `PEOPLE THE NOTE IS ABOUT:\n${context}`,
     ].join("\n");
     return parseJsonObject<AssistOutput>(await runClaude(prompt));
+  }
+
+  async detectConflicts(input: {
+    personName: string;
+    newFacts: FactRef[];
+    existingFacts: FactRef[];
+    today: string;
+  }): Promise<FactConflict[]> {
+    if (!input.newFacts.length || !input.existingFacts.length) return [];
+    const prompt = [
+      "You are Membro's Ledger member. The owner just filed new facts about a person. Find ONLY the cases where a NEW fact ACTIVELY contradicts an existing one, so an old note is no longer true.",
+      "A contradiction means the new statement negates or replaces the old (\"prefers tea\" then \"can't stand tea now, only coffee\"; \"vegetarian\" then \"back on steak\"). It is NOT a contradiction when the new fact merely ADDS information, covers a DIFFERENT attribute, or when both can be true at once (liking tea AND owning an espresso machine). A plain change over time that is already self-explanatory (\"left Acme, now at Globex\") is an update, not a collision to raise. When unsure, do NOT flag it: a wrong flag is worse than a missed one.",
+      "Compare each NEW fact against the EXISTING facts. Use the exact ids given in brackets.",
+      `Today is ${input.today}. Person: ${input.personName}.`,
+      `NEW facts:\n${input.newFacts.map((f) => `- [${f.id}] ${f.content}`).join("\n")}`,
+      `EXISTING facts:\n${input.existingFacts.map((f) => `- [${f.id}] ${f.content}`).join("\n")}`,
+      'Output ONLY a JSON object: {"conflicts":[{"newFactId":string,"oldFactId":string,"reason":string}]}. reason is one short, non-accusatory line. Return an empty array if there are no real contradictions.',
+    ].join("\n");
+    const parsed = parseJsonObject<{ conflicts?: FactConflict[] }>(await runClaude(prompt));
+    return sanitizeConflicts(parsed.conflicts, input.newFacts, input.existingFacts);
+  }
+
+  async research(input: { note: string; today: string; knownSubjects: string[] }): Promise<ResearchBrief[]> {
+    if (!input.note.trim()) return [];
+    const known = input.knownSubjects.length ? input.knownSubjects.join(", ") : "(nothing on file yet)";
+    const prompt = [
+      "You are Membro's Researcher, one of a small crew that reads every note the owner captures. If the note names a company, organization, product, or topic the owner has NEVER logged and that is genuinely worth knowing, web-search it and leave ONE short, current brief.",
+      "Each brief must carry one concrete, CURRENT fact (recent funding, a leadership change, a launch, a notable recent event) plus a one-line tie-back to why it matters right now given what the note says. Never write founding-year filler, mission-statement language, or an About-page paragraph. Keep each body to 2-4 plain sentences, the owner's voice, no em-dashes.",
+      "Stay SILENT (empty list) for household names the owner obviously knows, anything already on file, an ambiguous or joking mention, or when the search turns up nothing substantive. A missing brief is fine; a filler brief is not.",
+      `Today is ${input.today}. Already on file, do NOT brief these: ${known}.`,
+      `NOTE:\n${input.note}`,
+      'Output ONLY a JSON object: {"briefs":[{"subject":string,"body":string,"why":string}]}. Empty array if nothing is worth briefing.',
+    ].join("\n");
+    // WebSearch is what makes the brief current; runClaude still returns the final
+    // JSON message, which parseJsonObject pulls out of any surrounding prose.
+    const parsed = parseJsonObject<{ briefs?: ResearchBrief[] }>(
+      await runClaude(prompt, ["--allowedTools", "WebSearch"]),
+    );
+    return sanitizeBriefs(parsed.briefs, input.knownSubjects);
   }
 
   async reflect(entries: string[], today: string): Promise<string> {

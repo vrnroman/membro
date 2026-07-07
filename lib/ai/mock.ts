@@ -8,6 +8,9 @@ import type {
   ExtractedEntity,
   ExtractedFact,
   ExtractionResult,
+  FactConflict,
+  FactRef,
+  ResearchBrief,
   Signal,
 } from "./types";
 
@@ -283,6 +286,55 @@ export class MockAdapter implements AiAdapter {
     return { kind: "none", title: "", body: "", why: "Nothing to start from this one." };
   }
 
+  // Deterministic, honest contradiction check for the offline path and the test.
+  // Conservative on purpose (the ideator's bar): it flags ONLY an active polarity
+  // flip on a shared topic word ("Loves coffee" then "Hates coffee now"), never a
+  // mere addition, an evolution, or two things that are both true ("prefers tea" +
+  // "loves the espresso machine" share no topic token, so they never collide).
+  async detectConflicts(input: {
+    personName: string;
+    newFacts: FactRef[];
+    existingFacts: FactRef[];
+    today: string;
+  }): Promise<FactConflict[]> {
+    const out: FactConflict[] = [];
+    for (const nf of input.newFacts) {
+      for (const ef of input.existingFacts) {
+        if (nf.id === ef.id) continue;
+        if (contradicts(nf.content, ef.content)) {
+          out.push({
+            newFactId: nf.id,
+            oldFactId: ef.id,
+            reason: `"${ef.content}" and "${nf.content}" look like they may have changed.`,
+          });
+          break; // one collision per new fact is enough to raise the flag
+        }
+      }
+    }
+    return out;
+  }
+
+  // Deterministic offline Researcher: name any company-shaped subject the note
+  // mentions that is not already on file, and leave a short placeholder brief. The
+  // real (CLI) adapter web-searches; the mock stays honest that it did not.
+  async research(input: { note: string; today: string; knownSubjects: string[] }): Promise<ResearchBrief[]> {
+    const known = new Set(input.knownSubjects.map((s) => s.toLowerCase()));
+    const seen = new Set<string>();
+    const briefs: ResearchBrief[] = [];
+    for (const m of input.note.matchAll(COMPANY)) {
+      const subject = m[1].replace(/\.$/, "").trim();
+      const key = subject.toLowerCase();
+      if (known.has(key) || seen.has(key)) continue;
+      seen.add(key);
+      briefs.push({
+        subject,
+        body: `${subject} came up in your note and is not on file yet. Connect the Claude CLI for a live, web-researched one-paragraph brief here.`,
+        why: `You mentioned ${subject} for the first time.`,
+      });
+    }
+    return briefs.slice(0, 2); // never flood a single note with briefs
+  }
+
   async reflect(entries: string[]): Promise<string> {
     if (!entries.length) {
       return "Nothing in your diary yet. Capture a note about how you are doing and I'll reflect it back.";
@@ -301,6 +353,46 @@ export class MockAdapter implements AiAdapter {
 const ASSIST_TASK = /\b(send|sending|draft|write|prepare|prep|email|reply|respond|follow up|get back to|deck|slides|proposal|deliver|circle back)\b/i;
 const ASSIST_SITUATION = /\b(annoyed|upset|worried|frustrated|unhappy|awkward|tension|angry|concerned|pushed? back|how (do|should) i|what (do|should) i|what to (say|respond))\b/i;
 const ASSIST_DIARY = /\b(i'?m|i am|i was|i feel|i felt|feeling|anxious|nervous|tired|exhausted|excited|proud|grateful|stressed|overwhelmed|burnt out|burned out)\b/i;
+
+// Ledger Catch heuristics (mock/offline). A contradiction is an OPPOSITE-polarity
+// pair on a shared topic word — positive sentiment about X on one side, negative on
+// the other. Everything else (additions, evolutions, coexisting likes) stays silent.
+const POS_SENTIMENT = /\b(love|loves|loved|like|likes|liked|prefer|prefers|preferred|enjoy|enjoys|enjoyed|favou?rite|into)\b/i;
+const NEG_SENTIMENT = /\b(hate|hates|hated|dislike|dislikes|disliked|can'?t stand|no longer|not any ?more|stopped|quit|gave up|avoids?|allergic)\b/i;
+// Words that are never the *topic* of a contradiction (sentiment verbs + filler),
+// so the shared token we key on is a real subject noun, not "loves"/"really".
+const TOPIC_STOP = new Set([
+  "love", "loves", "loved", "like", "likes", "liked", "prefer", "prefers", "preferred",
+  "enjoy", "enjoys", "enjoyed", "favourite", "favorite", "hate", "hates", "hated",
+  "dislike", "dislikes", "stand", "longer", "anymore", "stopped", "quit", "avoid", "avoids",
+  "really", "always", "never", "still", "much", "very", "some", "thing", "things", "stuff",
+  "them", "they", "their", "your", "with", "that", "this", "have", "just", "want", "wants",
+]);
+
+function topicTokens(s: string): Set<string> {
+  return new Set((s.toLowerCase().match(/[a-z]{4,}/g) ?? []).filter((t) => !TOPIC_STOP.has(t)));
+}
+
+function sharedTopic(a: string, b: string): boolean {
+  const A = topicTokens(a);
+  const B = topicTokens(b);
+  for (const t of A) if (B.has(t)) return true;
+  return false;
+}
+
+// True only when the two facts talk about the same topic with opposite sentiment.
+function contradicts(a: string, b: string): boolean {
+  if (!sharedTopic(a, b)) return false;
+  const aPos = POS_SENTIMENT.test(a);
+  const aNeg = NEG_SENTIMENT.test(a);
+  const bPos = POS_SENTIMENT.test(b);
+  const bNeg = NEG_SENTIMENT.test(b);
+  return (aPos && bNeg) || (aNeg && bPos);
+}
+
+// Company-shaped subject: a capitalized name followed by an org suffix. Precise on
+// purpose so the offline Researcher does not brief every capitalized word.
+const COMPANY = /\b([A-Z][A-Za-z0-9&.\-]+(?:\s+(?:Inc|Corp|Corporation|Labs?|AI|Technologies|Tech|Systems|Solutions|Ltd|LLC|Group|Studios?|Ventures|Partners|Capital))\.?)\b/g;
 
 function capitalize(s: string): string {
   return s.length ? s[0].toUpperCase() + s.slice(1) : s;

@@ -36,6 +36,11 @@ function migrate(d: Database.Database): void {
   // add a constraint; the app enforces the enum) and defaulted to 'me', which
   // backfills every existing commitment to the old implicit assumption.
   if (!factCols.includes("owed_by")) d.exec("alter table facts add column owed_by text not null default 'me'");
+  // crew_facts carries the ids of the facts a note just filed, so the per-note
+  // crew's Ledger member can compare them against what was already on file. Added
+  // to assist_jobs (which predates the crew) as a nullable JSON column.
+  const jobCols = (d.prepare("pragma table_info(assist_jobs)").all() as { name: string }[]).map((c) => c.name);
+  if (!jobCols.includes("crew_facts")) d.exec("alter table assist_jobs add column crew_facts text");
 }
 
 // Single-user app: no user_id, no row-level security (the whole app is gated to
@@ -142,6 +147,7 @@ create table if not exists assist_jobs (
   id              text primary key,
   capture_id      text,
   note            text not null,
+  crew_facts      text,                        -- JSON [{personId, factIds:[...]}]: what this note filed, for the Ledger member
   status          text not null default 'queued' check (status in ('queued','done','failed')),
   attempts        integer not null default 0,
   next_attempt_at text not null,
@@ -165,6 +171,25 @@ create table if not exists briefs (
   generated_at      text not null,
   updated_at        text not null
 );
+
+-- Ledger Catch: a pending "possible contradiction" the per-note crew's Ledger
+-- member found between a newly filed fact and one already on file for the same
+-- person. The profile shows the two side by side with keep-new / keep-old /
+-- keep-both. Both fact FKs cascade on delete: resolving as keep-new / keep-old
+-- deletes the losing fact, which drops this row, so a resolved pair never
+-- re-surfaces; keep-both instead marks the row resolved (a recorded dismissal).
+create table if not exists fact_conflicts (
+  id          text primary key,
+  person_id   text not null references people (id) on delete cascade,
+  new_fact_id text not null references facts (id) on delete cascade,
+  old_fact_id text not null references facts (id) on delete cascade,
+  reason      text,
+  status      text not null default 'pending' check (status in ('pending','resolved')),
+  resolution  text check (resolution in ('keep_new','keep_old','keep_both')),
+  created_at  text not null,
+  resolved_at text
+);
+create index if not exists fact_conflicts_person_idx on fact_conflicts (person_id, status);
 
 -- Tiny key/value store for small bits of durable app state that don't warrant a
 -- table. Today it holds 'last_nudge_date' so the morning Telegram nudge is

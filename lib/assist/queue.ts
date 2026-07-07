@@ -10,6 +10,10 @@ export type AssistJob = {
   id: string;
   capture_id: string | null;
   note: string;
+  // JSON [{personId, factIds:[...]}]: the facts this note filed, so the crew's
+  // Ledger member can check them against what was already on file. Null on jobs
+  // queued before the crew existed, or a note that filed no facts.
+  crew_facts: string | null;
   status: "queued" | "done" | "failed";
   attempts: number;
   next_attempt_at: string;
@@ -17,18 +21,33 @@ export type AssistJob = {
   created_at: string;
 };
 
+// One person's freshly-filed facts, for the crew payload.
+export type CrewFacts = { personId: string; factIds: string[] };
+
 const now = () => new Date().toISOString();
 
-/** Queue a captured note for the assistant. Returns the new job id. */
-export function enqueueAssistJob(job: { captureId: string | null; note: string; firstAttemptAt: string }): string {
+/** Queue a captured note for the assistant + crew. Returns the new job id. */
+export function enqueueAssistJob(job: {
+  captureId: string | null;
+  note: string;
+  firstAttemptAt: string;
+  crewFacts?: CrewFacts[];
+}): string {
   const id = randomUUID();
   const ts = now();
   db()
     .prepare(
-      `insert into assist_jobs (id, capture_id, note, status, attempts, next_attempt_at, created_at, updated_at)
-       values (@id, @capture, @note, 'queued', 0, @next, @ts, @ts)`,
+      `insert into assist_jobs (id, capture_id, note, crew_facts, status, attempts, next_attempt_at, created_at, updated_at)
+       values (@id, @capture, @note, @crew, 'queued', 0, @next, @ts, @ts)`,
     )
-    .run({ id, capture: job.captureId, note: job.note, next: job.firstAttemptAt, ts });
+    .run({
+      id,
+      capture: job.captureId,
+      note: job.note,
+      crew: job.crewFacts && job.crewFacts.length ? JSON.stringify(job.crewFacts) : null,
+      next: job.firstAttemptAt,
+      ts,
+    });
   return id;
 }
 

@@ -131,6 +131,41 @@ async function main() {
   const info = await mock.assist({ note: "Priya joined the platform team.", today: TODAY, people: [{ name: "Priya", facts: [] }] });
   check("plain info -> none", info.kind === "none", `got ${info.kind}`);
 
+  // 6b. Ledger member (Ledger Catch): flag an ACTIVE contradiction, stay silent on
+  // a coexisting preference or a mere addition.
+  const flip = await mock.detectConflicts({
+    personName: "Tom",
+    newFacts: [{ id: "nf1", content: "Hates coffee now, switched to tea" }],
+    existingFacts: [{ id: "of1", content: "Loves coffee" }],
+    today: TODAY,
+  });
+  check("an active contradiction is flagged", flip.length === 1 && flip[0].newFactId === "nf1" && flip[0].oldFactId === "of1", `n=${flip.length}`);
+
+  const bothTrue = await mock.detectConflicts({
+    personName: "Tom",
+    newFacts: [{ id: "nf2", content: "Loves the espresso machine I got her" }],
+    existingFacts: [{ id: "of2", content: "Prefers tea" }],
+    today: TODAY,
+  });
+  check("coexisting preferences are not flagged", bothTrue.length === 0, `n=${bothTrue.length}`);
+
+  const addition = await mock.detectConflicts({
+    personName: "Tom",
+    newFacts: [{ id: "nf3", content: "Enjoys rock climbing" }],
+    existingFacts: [{ id: "of3", content: "Works at Acme" }],
+    today: TODAY,
+  });
+  check("a mere addition is not flagged", addition.length === 0, `n=${addition.length}`);
+
+  // 6c. Researcher member: brief a genuinely-new company, skip known ones and
+  // notes that name none.
+  const brief1 = await mock.research({ note: "Kicking off a pilot with Northwind Labs next week", today: TODAY, knownSubjects: [] });
+  check("a new company gets a brief", brief1.length === 1 && /Northwind Labs/.test(brief1[0].subject), `n=${brief1.length}`);
+  const brief2 = await mock.research({ note: "Kicking off a pilot with Northwind Labs next week", today: TODAY, knownSubjects: ["Northwind Labs"] });
+  check("a known company is not re-briefed", brief2.length === 0, `n=${brief2.length}`);
+  const brief3 = await mock.research({ note: "Grabbed lunch with Maya and talked about the garden", today: TODAY, knownSubjects: [] });
+  check("a plain note gets no brief", brief3.length === 0, `n=${brief3.length}`);
+
   // 7. Dated events: a soon date is an Action item, a far one is on the horizon.
   const datedPeople: PersonRow[] = [
     { id: "d1", name: "Nadia", company: null, role: null, blurb: null, birthday: null, next_meeting_at: null, last_contact_at: `${TODAY}T12:00:00Z` },

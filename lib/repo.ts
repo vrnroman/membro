@@ -117,6 +117,8 @@ export function listFactContents(personId: string): string[] {
   ).map((r) => r.content);
 }
 
+// Returns the new fact's id so the caller (capture) can hand it to the per-note
+// crew's Ledger member to check against what was already on file.
 export function insertFact(f: {
   person_id: string;
   kind?: FactRow["kind"];
@@ -124,14 +126,15 @@ export function insertFact(f: {
   due_at?: string | null;
   owed_by?: FactRow["owed_by"];
   confidence?: number;
-}): void {
+}): string {
+  const id = randomUUID();
   db()
     .prepare(
       `insert into facts (id, person_id, kind, content, due_at, owed_by, confidence, created_at)
        values (@id, @person_id, @kind, @content, @due_at, @owed_by, @confidence, @created_at)`,
     )
     .run({
-      id: randomUUID(),
+      id,
       person_id: f.person_id,
       kind: f.kind ?? "fact",
       content: f.content,
@@ -141,6 +144,7 @@ export function insertFact(f: {
       created_at: now(),
     });
   markBriefStale(f.person_id); // a new fact makes this person's Pre-Read out of date
+  return id;
 }
 
 export function getFact(id: string): FactRow | null {
@@ -194,6 +198,113 @@ export function deleteFact(id: string): void {
   });
   tx(id);
   if (owner) markBriefStale(owner.person_id); // removing a fact makes the Pre-Read out of date
+}
+
+// ── Fact conflicts (Ledger Catch) ─────────────────────────────────────────────
+export type ConflictFact = { id: string; content: string; created_at: string };
+export type PendingConflict = {
+  id: string;
+  reason: string | null;
+  newFact: ConflictFact;
+  oldFact: ConflictFact;
+};
+
+// Record a pending contradiction. Two things keep it clean when BOTH facts' capture
+// jobs independently notice the same collision (each treats its own fact as "new"):
+//   1. Orient by recency — the more recently filed fact is always new_fact_id, so the
+//      profile's Newer/Older labels are right whichever job raised it.
+//   2. Dedup on the UNORDERED pair (either orientation), so the pair is recorded once.
+// Idempotent, so a crew-job retry never stacks duplicates. Returns the new row id, or
+// null when it was a duplicate (or a fact had already vanished).
+export function insertConflict(c: {
+  personId: string;
+  newFactId: string;
+  oldFactId: string;
+  reason: string | null;
+}): string | null {
+  const d = db();
+  const nf = d.prepare("select created_at from facts where id = ?").get(c.newFactId) as { created_at: string } | undefined;
+  const of = d.prepare("select created_at from facts where id = ?").get(c.oldFactId) as { created_at: string } | undefined;
+  if (!nf || !of) return null; // a fact was deleted out from under us; nothing to record
+  let newId = c.newFactId;
+  let oldId = c.oldFactId;
+  // Newer fact is new_fact_id. Tie-break on id when created_at is identical (same-
+  // millisecond captures) so orientation is deterministic and the unordered dedup
+  // below stays stable instead of depending on which crew job arrived first.
+  if (nf.created_at < of.created_at || (nf.created_at === of.created_at && c.newFactId < c.oldFactId)) {
+    newId = c.oldFactId;
+    oldId = c.newFactId;
+  }
+  const dup = d
+    .prepare(
+      "select 1 from fact_conflicts where (new_fact_id = @a and old_fact_id = @b) or (new_fact_id = @b and old_fact_id = @a)",
+    )
+    .get({ a: newId, b: oldId });
+  if (dup) return null;
+  const id = randomUUID();
+  d.prepare(
+    `insert into fact_conflicts (id, person_id, new_fact_id, old_fact_id, reason, status, created_at)
+     values (?, ?, ?, ?, ?, 'pending', ?)`,
+  ).run(id, c.personId, newId, oldId, c.reason ?? null, now());
+  return id;
+}
+
+// Pending contradictions for a person, hydrated with both facts' current text and
+// dates for the side-by-side. The INNER JOINs mean a conflict whose facts were
+// deleted elsewhere simply drops out (belt-and-suspenders with the FK cascade).
+export function listPendingConflictsForPerson(personId: string): PendingConflict[] {
+  const rows = db()
+    .prepare(
+      `select c.id as id, c.reason as reason,
+              newf.id as new_id, newf.content as new_content, newf.created_at as new_created,
+              oldf.id as old_id, oldf.content as old_content, oldf.created_at as old_created
+       from fact_conflicts c
+       join facts newf on newf.id = c.new_fact_id
+       join facts oldf on oldf.id = c.old_fact_id
+       where c.person_id = ? and c.status = 'pending'
+       order by c.created_at desc`,
+    )
+    .all(personId) as {
+    id: string;
+    reason: string | null;
+    new_id: string;
+    new_content: string;
+    new_created: string;
+    old_id: string;
+    old_content: string;
+    old_created: string;
+  }[];
+  return rows.map((r) => ({
+    id: r.id,
+    reason: r.reason,
+    newFact: { id: r.new_id, content: r.new_content, created_at: r.new_created },
+    oldFact: { id: r.old_id, content: r.old_content, created_at: r.old_created },
+  }));
+}
+
+export type ConflictRow = {
+  id: string;
+  person_id: string;
+  new_fact_id: string;
+  old_fact_id: string;
+  status: "pending" | "resolved";
+  resolution: string | null;
+};
+
+export function getConflict(id: string): ConflictRow | null {
+  return (
+    (db()
+      .prepare("select id, person_id, new_fact_id, old_fact_id, status, resolution from fact_conflicts where id = ?")
+      .get(id) as ConflictRow) ?? null
+  );
+}
+
+// Mark a conflict resolved without touching any fact (keep-both, and defensively
+// before a keep-new / keep-old delete). A resolved row never re-raises the pair.
+export function resolveConflict(id: string, resolution: "keep_new" | "keep_old" | "keep_both"): void {
+  db()
+    .prepare("update fact_conflicts set status = 'resolved', resolution = ?, resolved_at = ? where id = ?")
+    .run(resolution, now(), id);
 }
 
 // ── Captures ────────────────────────────────────────────────────────────────
@@ -367,6 +478,16 @@ export function deleteAssistsForCapture(captureId: string): void {
 
 export function countPendingAssists(): number {
   return (db().prepare("select count(*) as n from assists where status = 'pending'").get() as { n: number }).n;
+}
+
+// Subjects the Researcher crew member has already briefed (stored on the assist
+// meta), so it never re-briefs the same company on a later note even when that
+// company never became a saved contact.
+export function listResearchedSubjects(): string[] {
+  const rows = db()
+    .prepare("select distinct json_extract(meta, '$.subject') as subject from assists where json_extract(meta, '$.crew') = 'researcher'")
+    .all() as { subject: string | null }[];
+  return rows.map((r) => r.subject).filter((s): s is string => !!s);
 }
 
 // ── KV (small durable app state) ──────────────────────────────────────────────

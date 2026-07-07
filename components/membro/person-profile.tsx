@@ -18,10 +18,15 @@ type Fact = {
   created_at: string;
 };
 
+type ConflictFact = { id: string; content: string; created_at: string };
+type Conflict = { id: string; reason: string | null; newFact: ConflictFact; oldFact: ConflictFact };
+
 export function PersonProfile({ personId }: { personId: string }) {
   const router = useRouter();
   const [person, setPerson] = useState<PersonRow | null>(null);
   const [facts, setFacts] = useState<Fact[]>([]);
+  const [conflicts, setConflicts] = useState<Conflict[]>([]);
+  const [resolving, setResolving] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [brief, setBrief] = useState<BriefContent | null>(null);
   const [briefMeta, setBriefMeta] = useState<{ generatedAt: string | null; stale: boolean } | null>(null);
@@ -43,6 +48,7 @@ export function PersonProfile({ personId }: { personId: string }) {
     const data = await res.json();
     setPerson((data.person ?? null) as PersonRow | null);
     setFacts((data.facts ?? []) as Fact[]);
+    setConflicts((data.conflicts ?? []) as Conflict[]);
     setBrief((data.brief ?? null) as BriefContent | null);
     setBriefMeta((data.briefMeta ?? null) as { generatedAt: string | null; stale: boolean } | null);
     setLoading(false);
@@ -113,6 +119,22 @@ export function PersonProfile({ personId }: { personId: string }) {
   async function deleteFact(id: string) {
     await fetch(`/api/facts/${id}`, { method: "DELETE" });
     load();
+  }
+  // Resolve a possible contradiction. Optimistically drop the card so it dissolves
+  // at once, then reload so a kept/removed fact is reflected everywhere.
+  async function pickConflict(conflictId: string, resolution: "keep_new" | "keep_old" | "keep_both") {
+    setResolving(conflictId);
+    try {
+      await fetch(`/api/conflicts/${conflictId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ resolution }),
+      });
+      setConflicts((cs) => cs.filter((c) => c.id !== conflictId));
+      load();
+    } finally {
+      setResolving(null);
+    }
   }
   async function deletePerson() {
     await fetch(`/api/people/${personId}`, { method: "DELETE" });
@@ -212,6 +234,23 @@ export function PersonProfile({ personId }: { personId: string }) {
         )}
       </div>
 
+      {conflicts.length > 0 && (
+        <div className="rounded-2xl border border-amber-200 bg-amber-50/60 p-4 dark:border-amber-900/50 dark:bg-amber-950/20">
+          <h2 className="text-sm font-semibold uppercase tracking-wide text-amber-700 dark:text-amber-400">
+            This may have changed
+          </h2>
+          <p className="mt-1 text-xs text-muted-foreground">
+            Two notes about {person.name.split(" ")[0]} look like they might not both still be true. Keep whichever
+            one is right, or keep both.
+          </p>
+          <div className="mt-3 flex flex-col gap-3">
+            {conflicts.map((c) => (
+              <ConflictCard key={c.id} conflict={c} busy={resolving === c.id} onPick={(r) => pickConflict(c.id, r)} />
+            ))}
+          </div>
+        </div>
+      )}
+
       {commitments.length > 0 && (
         <Section title="Promises">
           {commitments.map((f) => (
@@ -305,6 +344,56 @@ function DeleteControl({ onDelete, label = "Remove" }: { onDelete: () => void; l
     >
       <X className="h-4 w-4" />
     </button>
+  );
+}
+
+// One "possible contradiction": the two facts side by side (newer / older), with
+// a one-tap Keep newer / Keep older / Keep both. Quiet on purpose — no red, no
+// alarm; a contradiction is a shrug, not a fault.
+function ConflictCard({
+  conflict,
+  busy,
+  onPick,
+}: {
+  conflict: Conflict;
+  busy: boolean;
+  onPick: (r: "keep_new" | "keep_old" | "keep_both") => void;
+}) {
+  return (
+    <div className="rounded-xl border bg-background p-3">
+      <div className="grid gap-2 sm:grid-cols-2">
+        <FactSide label="Newer" fact={conflict.newFact} />
+        <FactSide label="Older" fact={conflict.oldFact} />
+      </div>
+      <div className="mt-3 flex flex-wrap gap-2">
+        <Button size="sm" className="rounded-full" disabled={busy} onClick={() => onPick("keep_new")}>
+          Keep newer
+        </Button>
+        <Button size="sm" variant="outline" className="rounded-full" disabled={busy} onClick={() => onPick("keep_old")}>
+          Keep older
+        </Button>
+        <Button
+          size="sm"
+          variant="ghost"
+          className="rounded-full text-muted-foreground"
+          disabled={busy}
+          onClick={() => onPick("keep_both")}
+        >
+          Keep both
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+function FactSide({ label, fact }: { label: string; fact: ConflictFact }) {
+  return (
+    <div className="rounded-lg bg-muted/50 p-2">
+      <div className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+        {label} · {fact.created_at.slice(0, 10)}
+      </div>
+      <p className="mt-0.5 text-sm">{fact.content}</p>
+    </div>
   );
 }
 

@@ -19,6 +19,9 @@ export default function ProtectedLayout({
               <Link href={"/protected"} className="text-muted-foreground hover:text-foreground">
                 Today
               </Link>
+              <Link href={"/protected/notes"} className="text-muted-foreground hover:text-foreground">
+                Notes
+              </Link>
               <Link href={"/protected/promises"} className="text-muted-foreground hover:text-foreground">
                 Promises
               </Link>

@@ -126,12 +126,16 @@ export function insertFact(f: {
   due_at?: string | null;
   owed_by?: FactRow["owed_by"];
   confidence?: number;
+  // The note this fact came from. Set by capture so an edit-and-reprocess of that
+  // note can cleanly delete exactly the facts it filed and re-file them, instead of
+  // stacking a second copy. Null for facts added by hand (no source note).
+  capture_id?: string | null;
 }): string {
   const id = randomUUID();
   db()
     .prepare(
-      `insert into facts (id, person_id, kind, content, due_at, owed_by, confidence, created_at)
-       values (@id, @person_id, @kind, @content, @due_at, @owed_by, @confidence, @created_at)`,
+      `insert into facts (id, person_id, kind, content, due_at, owed_by, confidence, capture_id, created_at)
+       values (@id, @person_id, @kind, @content, @due_at, @owed_by, @confidence, @capture_id, @created_at)`,
     )
     .run({
       id,
@@ -141,6 +145,7 @@ export function insertFact(f: {
       due_at: f.due_at ?? null,
       owed_by: f.owed_by ?? "me",
       confidence: f.confidence ?? 1,
+      capture_id: f.capture_id ?? null,
       created_at: now(),
     });
   markBriefStale(f.person_id); // a new fact makes this person's Pre-Read out of date
@@ -316,6 +321,97 @@ export function insertCapture(body: string, sourceType: string): string {
     .prepare("insert into captures (id, body, source_type, created_at) values (?, ?, ?, ?)")
     .run(id, body, sourceType, now());
   return id;
+}
+
+export type CaptureRow = { id: string; body: string; source_type: string; created_at: string };
+
+// One captured note plus a summary of what it put on file (which people, which
+// facts) — the raw material for the editable Notes inbox. `filed` is empty for
+// notes captured before facts carried their source note, and for a note that
+// extracted nothing; the note's text is still shown and editable either way.
+export type CaptureWithFiled = CaptureRow & {
+  filed: { personId: string; personName: string; kind: FactRow["kind"]; content: string }[];
+};
+
+export function getCapture(id: string): CaptureRow | null {
+  return (
+    (db()
+      .prepare("select id, body, source_type, created_at from captures where id = ?")
+      .get(id) as CaptureRow) ?? null
+  );
+}
+
+export function listCapturesWithFiled(limit = 200): CaptureWithFiled[] {
+  const caps = db()
+    .prepare("select id, body, source_type, created_at from captures order by created_at desc limit ?")
+    .all(limit) as CaptureRow[];
+  const filedStmt = db().prepare(
+    `select f.person_id as person_id, f.kind as kind, f.content as content, p.name as person_name
+     from facts f join people p on p.id = f.person_id
+     where f.capture_id = ? order by f.created_at asc`,
+  );
+  return caps.map((c) => ({
+    ...c,
+    filed: (filedStmt.all(c.id) as { person_id: string; kind: FactRow["kind"]; content: string; person_name: string }[]).map(
+      (r) => ({ personId: r.person_id, personName: r.person_name, kind: r.kind, content: r.content }),
+    ),
+  }));
+}
+
+// Point a capture at freshly edited text. source_type is kept as-is for provenance
+// (a voice note stays labelled "voice" even after its transcript is corrected).
+export function updateCaptureBody(id: string, body: string): void {
+  db().prepare("update captures set body = ? where id = ?").run(body, id);
+}
+
+export function deleteCapture(id: string): void {
+  db().prepare("delete from captures where id = ?").run(id);
+}
+
+// Delete every fact a given note filed, plus any single-source card built from one
+// of them (mirrors deleteFact's card cleanup). fact_conflicts referencing a deleted
+// fact fall away via the ON DELETE CASCADE. Returns the distinct people who lost a
+// fact, so the caller can prune any left with nothing (a note re-filed onto a
+// corrected name orphans the wrong one). Marks each person's brief stale.
+export function deleteFactsForCapture(captureId: string): string[] {
+  const d = db();
+  const facts = d.prepare("select id, person_id from facts where capture_id = ?").all(captureId) as {
+    id: string;
+    person_id: string;
+  }[];
+  if (facts.length === 0) return [];
+  const personIds = [...new Set(facts.map((f) => f.person_id))];
+  const delCard = d.prepare("delete from cards where json_extract(meta, '$.source_fact_id') = ?");
+  const delFact = d.prepare("delete from facts where id = ?");
+  const tx = d.transaction(() => {
+    for (const f of facts) {
+      delCard.run(f.id);
+      delFact.run(f.id);
+    }
+  });
+  tx();
+  for (const pid of personIds) markBriefStale(pid);
+  return personIds;
+}
+
+// Prune any of the given people who now have zero facts — a contact that existed
+// only because of a note that has since been re-filed onto a corrected name (the
+// mis-heard "John" after "Joanne" lands). Never touches the diary self row, and
+// leaves alone anyone still holding a fact from another note. deletePerson cascades
+// their cards / briefs and nulls any assist. Returns the ids actually removed.
+export function pruneEmptyPeople(personIds: string[]): string[] {
+  const d = db();
+  const countStmt = d.prepare("select count(*) as n from facts where person_id = ?");
+  const removed: string[] = [];
+  for (const pid of personIds) {
+    if (pid === SELF_ID) continue;
+    const { n } = countStmt.get(pid) as { n: number };
+    if (n === 0) {
+      deletePerson(pid);
+      removed.push(pid);
+    }
+  }
+  return removed;
 }
 
 // ── Cards (The Stack) ─────────────────────────────────────────────────────────

@@ -4,6 +4,11 @@ import {
   insertPerson,
   updatePerson,
   insertFact,
+  updateCaptureBody,
+  deleteFactsForCapture,
+  deleteAssistsForCapture,
+  deleteDiaryForCapture,
+  pruneEmptyPeople,
 } from "@/lib/repo";
 import { getAdapter } from "@/lib/ai";
 import { ExtractedEntity } from "@/lib/ai/types";
@@ -21,6 +26,12 @@ export type CaptureResult = {
   landed: { person: string; created: boolean; facts: number }[];
   ambiguous: { name: string; reason: string }[];
   adapter: string;
+  // The note this filed under. Returned so the Notes inbox can reconcile a
+  // reprocess in place without a refetch.
+  captureId: string;
+  // People dropped because a reprocess re-filed the note onto a corrected name and
+  // left them with nothing (the mis-heard contact). Empty on a first capture.
+  removedPeople?: string[];
 };
 
 export type CaptureInput = {
@@ -58,8 +69,9 @@ function normalizeBirthday(value: string | null | undefined, today: string): str
  * itself fails (the caller decides whether to retry); individual bad people or
  * facts are skipped without failing the whole note.
  */
-export async function fileNote(input: CaptureInput): Promise<CaptureResult> {
+export async function fileNote(input: CaptureInput, opts?: { captureId?: string }): Promise<CaptureResult> {
   const { text = "", sourceType = "text", imageBase64, imageMediaType } = input;
+  const reprocessId = opts?.captureId;
 
   const today = localToday();
   const adapter = getAdapter();
@@ -74,8 +86,22 @@ export async function fileNote(input: CaptureInput): Promise<CaptureResult> {
     imageMediaType,
   });
 
-  // Keep the raw input for audit / show-the-work.
-  const captureId = insertCapture(text || "(image)", sourceType);
+  // First capture: keep the raw input for audit / show-the-work. Reprocess (the
+  // Notes inbox saved an edit): reuse the same note so its lineage is stable, point
+  // it at the corrected text, and clear what the old text filed — the facts (any
+  // orphaned people are pruned once the new ones land), and this note's prior crew
+  // output (drafts / diary) — before re-extracting below.
+  let captureId: string;
+  let reprocessedPeople: string[] = [];
+  if (reprocessId) {
+    captureId = reprocessId;
+    updateCaptureBody(captureId, text || "(image)");
+    reprocessedPeople = deleteFactsForCapture(captureId);
+    deleteAssistsForCapture(captureId);
+    deleteDiaryForCapture(captureId);
+  } else {
+    captureId = insertCapture(text || "(image)", sourceType);
+  }
 
   const landed: CaptureResult["landed"] = [];
   const ambiguous: CaptureResult["ambiguous"] = [];
@@ -143,6 +169,7 @@ export async function fileNote(input: CaptureInput): Promise<CaptureResult> {
           due_at: f.due_at ?? null,
           owed_by: f.kind === "commitment" ? f.owed_by ?? "me" : "me",
           confidence: entity.confidence,
+          capture_id: captureId,
         });
         factCount++;
         const ids = crewByPerson.get(person.id) ?? [];
@@ -171,5 +198,10 @@ export async function fileNote(input: CaptureInput): Promise<CaptureResult> {
     }
   }
 
-  return { landed, ambiguous, adapter: adapter.label };
+  // Reprocess only: now that the corrected facts have landed, drop any person the
+  // old text created who is left with nothing (the mis-heard name). Anyone re-filed
+  // onto still holds facts, so they are spared.
+  const removedPeople = reprocessId ? pruneEmptyPeople(reprocessedPeople) : [];
+
+  return { landed, ambiguous, adapter: adapter.label, captureId, removedPeople };
 }

@@ -10,6 +10,7 @@ import {
   BriefContent,
   BriefInput,
   BuiltCard,
+  type CaptureImage,
   ExtractionResult,
   FactConflict,
   FactRef,
@@ -99,9 +100,9 @@ export class ClaudeCliAdapter implements AiAdapter {
     text: string;
     today: string;
     existingNames: string[];
-    imageBase64?: string;
-    imageMediaType?: string;
+    images?: CaptureImage[];
   }): Promise<ExtractionResult> {
+    const images = input.images ?? [];
     // Shared extraction instructions, reused by the text and photo paths.
     const instructions = [
       "You are the memory engine for Membro, a personal CRM for one busy professional.",
@@ -115,22 +116,33 @@ export class ClaudeCliAdapter implements AiAdapter {
     ];
 
     // Photo capture: the CLI can't take an inline base64 image, but it CAN read an
-    // image file with its Read tool. Write the photo to a temp file, point the run
-    // at it (pre-approving Read and whitelisting the temp dir so there is no
+    // image file with its Read tool. Write each photo to a temp file, point the run
+    // at them (pre-approving Read and whitelisting the temp dir so there is no
     // permission prompt in -p mode), then clean up. This is what makes snapping a
     // photo of an email actually file people and facts instead of silently nothing.
-    if (input.imageBase64) {
-      const dir = tmpdir();
-      const path = join(dir, `membro-capture-${randomUUID()}.${extForMedia(input.imageMediaType)}`);
-      await writeFile(path, Buffer.from(input.imageBase64, "base64"));
+    // Several photos = one long item shot across pages; the CLI reads them all and
+    // reconstructs the order from their content.
+    if (images.length) {
+      const dir = tmpdir(); // one dir for every page, so a single --add-dir covers them
+      const paths: string[] = [];
       try {
+        for (const img of images) {
+          const path = join(dir, `membro-capture-${randomUUID()}.${extForMedia(img.mediaType)}`);
+          await writeFile(path, Buffer.from(img.base64, "base64"));
+          paths.push(path);
+        }
+        const many = paths.length > 1;
         const prompt = [
           ...instructions,
           "",
-          "The note is a PHOTO — a screenshot or an email. Use your Read tool to open the image file at the path below, then extract the people and facts from what it shows.",
-          input.text.trim() ? `The owner also typed this alongside the photo (use it as context):\n${input.text}` : "",
+          many
+            ? `The note is ${paths.length} PHOTOS of ONE longer item (e.g. a multi-page email or a long message), listed below possibly OUT OF ORDER. Use your Read tool to open EVERY image, work out the correct reading order from their content (page numbers, a greeting then a sign-off, sentences that carry across pages), then read them as one continuous document and extract the people and facts from the whole thing. Do not treat the photos as separate notes.`
+            : "The note is a PHOTO — a screenshot or an email. Use your Read tool to open the image file at the path below, then extract the people and facts from what it shows.",
+          input.text.trim() ? `The owner also typed this alongside the photo(s) (use it as context):\n${input.text}` : "",
           "",
-          `IMAGE PATH: ${path}`,
+          many
+            ? `IMAGE PATHS (upload order, may not be the reading order):\n${paths.map((p, i) => `${i + 1}. ${p}`).join("\n")}`
+            : `IMAGE PATH: ${paths[0]}`,
         ]
           .filter(Boolean)
           .join("\n");
@@ -138,7 +150,7 @@ export class ClaudeCliAdapter implements AiAdapter {
           await runClaude(prompt, ["--allowedTools", "Read", "--add-dir", dir]),
         );
       } finally {
-        await unlink(path).catch(() => {}); // never leave the photo on disk
+        await Promise.all(paths.map((p) => unlink(p).catch(() => {}))); // never leave photos on disk
       }
     }
 

@@ -40,6 +40,10 @@ export function CaptureBox({ onCaptured }: { onCaptured: () => void }) {
   const [voiceError, setVoiceError] = useState<string | null>(null);
   const [result, setResult] = useState<Result | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // Photos staged for the next capture. Several = one long item (e.g. an email that
+  // took two shots to cover); they file together as ONE note. dataUrl drives the
+  // thumbnail and yields the base64 we send.
+  const [photos, setPhotos] = useState<{ dataUrl: string; mediaType: string }[]>([]);
 
   const taRef = useRef<HTMLTextAreaElement>(null);
   const recorderRef = useRef<MediaRecorder | null>(null);
@@ -71,6 +75,7 @@ export function CaptureBox({ onCaptured }: { onCaptured: () => void }) {
       if (!res.ok) throw new Error(data.error || "capture failed");
       setResult(data);
       setText("");
+      setPhotos([]);
       onCaptured();
     } catch (e) {
       setError((e as Error).message);
@@ -80,6 +85,15 @@ export function CaptureBox({ onCaptured }: { onCaptured: () => void }) {
   }
 
   function remember() {
+    // Photos staged? File them (plus any typed text as context) as one photo note.
+    if (photos.length > 0) {
+      send({
+        text,
+        sourceType: "photo",
+        images: photos.map((p) => ({ base64: p.dataUrl.split(",")[1] ?? "", mediaType: p.mediaType })),
+      });
+      return;
+    }
     if (!text.trim()) return;
     send({ text, sourceType: "text" });
   }
@@ -190,17 +204,34 @@ export function CaptureBox({ onCaptured }: { onCaptured: () => void }) {
     if (kept) fileVoice(kept.blob, kept.mime);
   }
 
+  function readAsDataUrl(file: File): Promise<{ dataUrl: string; mediaType: string }> {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve({ dataUrl: reader.result as string, mediaType: file.type });
+      reader.onerror = () => reject(new Error("could not read photo"));
+      reader.readAsDataURL(file);
+    });
+  }
+
+  // Add the picked photo(s) to the tray instead of filing right away, so several
+  // shots of one long email can ride into a single note. Tapping the camera again
+  // appends more; hit Remember to file them all together.
   async function onPhoto(e: React.ChangeEvent<HTMLInputElement>) {
-    const file = e.target.files?.[0];
+    const files = Array.from(e.target.files ?? []);
     e.target.value = "";
-    if (!file) return;
-    const reader = new FileReader();
-    reader.onload = () => {
-      const dataUrl = reader.result as string;
-      const base64 = dataUrl.split(",")[1];
-      send({ text, sourceType: "photo", imageBase64: base64, imageMediaType: file.type });
-    };
-    reader.readAsDataURL(file);
+    if (!files.length) return;
+    try {
+      const added = await Promise.all(files.map(readAsDataUrl));
+      setPhotos((prev) => [...prev, ...added]);
+      setError(null);
+      setResult(null);
+    } catch {
+      setError("Couldn't read one of those photos. Try again.");
+    }
+  }
+
+  function removePhoto(index: number) {
+    setPhotos((prev) => prev.filter((_, i) => i !== index));
   }
 
   return (
@@ -216,6 +247,36 @@ export function CaptureBox({ onCaptured }: { onCaptured: () => void }) {
           if ((e.metaKey || e.ctrlKey) && e.key === "Enter") remember();
         }}
       />
+
+      {photos.length > 0 && (
+        <div className="mt-3">
+          <div className="flex flex-wrap gap-2">
+            {photos.map((p, i) => (
+              <div key={i} className="relative h-16 w-16 overflow-hidden rounded-lg border">
+                {/* eslint-disable-next-line @next/next/no-img-element */}
+                <img src={p.dataUrl} alt={`Photo ${i + 1}`} className="h-full w-full object-cover" />
+                <span className="absolute left-0 top-0 rounded-br bg-black/60 px-1 text-[10px] font-medium leading-4 text-white">
+                  {i + 1}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => removePhoto(i)}
+                  aria-label={`Remove photo ${i + 1}`}
+                  title="Remove"
+                  className="absolute right-0 top-0 flex h-4 w-4 items-center justify-center rounded-bl bg-black/60 text-white hover:bg-black/80"
+                >
+                  <X className="h-3 w-3" />
+                </button>
+              </div>
+            ))}
+          </div>
+          <p className="mt-1.5 text-xs text-muted-foreground">
+            {photos.length === 1
+              ? "1 photo attached. Add more shots of the same email and I'll stitch them into one note."
+              : `${photos.length} photos — I'll read them together as one note and work out the page order.`}
+          </p>
+        </div>
+      )}
 
       {recording ? (
         // Honest recording surface: you can see it's listening and how to stop.
@@ -239,7 +300,11 @@ export function CaptureBox({ onCaptured }: { onCaptured: () => void }) {
         </div>
       ) : (
         <div className="mt-3 flex flex-wrap items-center gap-2">
-          <Button onClick={remember} disabled={busy || filing || !text.trim()} className="rounded-full">
+          <Button
+            onClick={remember}
+            disabled={busy || filing || (!text.trim() && photos.length === 0)}
+            className="rounded-full"
+          >
             {busy ? <Loader2 className="mr-1 h-4 w-4 animate-spin" /> : null}
             Remember
           </Button>
@@ -256,10 +321,10 @@ export function CaptureBox({ onCaptured }: { onCaptured: () => void }) {
             <Mic className="h-4 w-4" />
           </Button>
           <label className="inline-flex">
-            <input type="file" accept="image/*" className="hidden" onChange={onPhoto} />
+            <input type="file" accept="image/*" multiple className="hidden" onChange={onPhoto} />
             <span
               className="inline-flex h-9 w-9 cursor-pointer items-center justify-center rounded-full border bg-background hover:bg-accent"
-              title="Photo of a screen or email"
+              title="Photo of a screen or email — attach several for one long email"
             >
               <Camera className="h-4 w-4" />
             </span>

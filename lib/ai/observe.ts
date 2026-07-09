@@ -28,7 +28,7 @@ export function observed(adapter: AiAdapter): AiAdapter {
     async extract(input): Promise<ExtractionResult> {
       const gen = startObservation(
         "membro.extract",
-        { model, input: { text: input.text, hasImage: !!input.imageBase64, today: input.today } },
+        { model, input: { text: input.text, images: input.images?.length ?? 0, today: input.today } },
         { asType: "generation" },
       );
       try {

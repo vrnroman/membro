@@ -26,6 +26,11 @@ export type ExtractedEntity = {
 
 export type ExtractionResult = { entities: ExtractedEntity[] };
 
+// One photo attached to a capture. A single note can carry several of these when
+// the owner shot a long email / document across multiple photos; the adapter reads
+// them together as one, working out the page order from their content.
+export type CaptureImage = { base64: string; mediaType?: string };
+
 // The per-note assistant pass. After a note is saved, this classifies it and,
 // when it warrants, starts the work: a ready-to-send draft for a task, a read +
 // drafted reply for a situation, or routing a first-person note to the diary.
@@ -128,7 +133,10 @@ export type BuiltCard = {
 
 export interface AiAdapter {
   readonly label: string; // "claude" | "mock", surfaced in the UI
-  extract(input: { text: string; today: string; existingNames: string[]; imageBase64?: string; imageMediaType?: string }): Promise<ExtractionResult>;
+  // A photo note can be SEVERAL images of one longer item (e.g. a two-page email
+  // shot as two photos). They arrive as an ordered list, but the adapter should
+  // reorder by content, not trust the upload order, and read them as one document.
+  extract(input: { text: string; today: string; existingNames: string[]; images?: CaptureImage[] }): Promise<ExtractionResult>;
   buildCard(signal: Signal, today: string): Promise<BuiltCard>;
   brief(input: BriefInput): Promise<BriefContent>;
   // Per-note assistant: classify a freshly captured note and start the work.

@@ -11,7 +11,7 @@ import {
   pruneEmptyPeople,
 } from "@/lib/repo";
 import { getAdapter } from "@/lib/ai";
-import { ExtractedEntity } from "@/lib/ai/types";
+import { ExtractedEntity, type CaptureImage } from "@/lib/ai/types";
 import { enqueueAssistJob, type CrewFacts } from "@/lib/assist/queue";
 import { localToday } from "@/lib/today";
 
@@ -37,8 +37,9 @@ export type CaptureResult = {
 export type CaptureInput = {
   text: string;
   sourceType: "text" | "voice" | "photo";
-  imageBase64?: string;
-  imageMediaType?: string;
+  // Zero or more photos for this one note. Several means the owner captured a long
+  // item (e.g. an email) across multiple photos; they file as a single memory.
+  images?: CaptureImage[];
 };
 
 type PersonName = { id: string; name: string };
@@ -70,7 +71,7 @@ function normalizeBirthday(value: string | null | undefined, today: string): str
  * facts are skipped without failing the whole note.
  */
 export async function fileNote(input: CaptureInput, opts?: { captureId?: string }): Promise<CaptureResult> {
-  const { text = "", sourceType = "text", imageBase64, imageMediaType } = input;
+  const { text = "", sourceType = "text", images } = input;
   const reprocessId = opts?.captureId;
 
   const today = localToday();
@@ -82,8 +83,7 @@ export async function fileNote(input: CaptureInput, opts?: { captureId?: string 
     text,
     today,
     existingNames: people.map((p) => p.name),
-    imageBase64,
-    imageMediaType,
+    images,
   });
 
   // First capture: keep the raw input for audit / show-the-work. Reprocess (the

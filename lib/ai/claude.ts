@@ -9,6 +9,7 @@ import {
   BRIEF_SCHEMA,
   BuiltCard,
   CARD_SCHEMA,
+  type CaptureImage,
   CONFLICTS_SCHEMA,
   EXTRACTION_SCHEMA,
   ExtractionResult,
@@ -19,6 +20,22 @@ import {
   sanitizeConflicts,
   Signal,
 } from "./types";
+
+// Browser media type -> the four the Anthropic image block accepts. Unknown /
+// absent falls back to png (screenshots are usually png).
+function imageMedia(t?: string): "image/png" | "image/jpeg" | "image/webp" | "image/gif" {
+  switch ((t || "").toLowerCase()) {
+    case "image/jpeg":
+    case "image/jpg":
+      return "image/jpeg";
+    case "image/webp":
+      return "image/webp";
+    case "image/gif":
+      return "image/gif";
+    default:
+      return "image/png";
+  }
+}
 
 // Opus 4.8 is the house default; override with MEMBRO_MODEL if you want to trade
 // some quality for cost (e.g. claude-sonnet-4-6).
@@ -63,13 +80,16 @@ export class ClaudeAdapter implements AiAdapter {
     text: string;
     today: string;
     existingNames: string[];
-    imageBase64?: string;
-    imageMediaType?: string;
+    images?: CaptureImage[];
   }): Promise<ExtractionResult> {
+    const images = input.images ?? [];
     const system = [
       "You are the memory engine for Membro, a personal CRM for one busy professional.",
       "From a raw note (typed, dictated, or read off a screenshot) extract the PEOPLE mentioned and the durable facts about each one.",
       "One note can mention several people — split the note and route each fragment to the right person (this is the core feature).",
+      images.length > 1
+        ? "This note is SEVERAL photos of ONE longer item (e.g. a two-page email), attached below possibly out of order. First work out the true reading order from their content — page numbers, a greeting then a sign-off, sentences that continue from one photo into the next — then read them as one continuous document before extracting. Do not treat the photos as separate notes."
+        : "",
       `Today is ${input.today}; resolve relative dates ("next week", "Thursday") to absolute ISO datetimes in due_at.`,
       "Fact kinds: 'commitment' = a promise in EITHER direction (the note-taker owes someone, OR someone owes the note-taker); 'date' = a one-off dated event; 'preference' = how the person likes things; 'fact' = anything else worth remembering.",
       "For a commitment set owed_by: 'me' when the NOTE-TAKER promised to do something (\"I'll send the deck\", \"I owe her the doc\"), 'them' when the OTHER person owes the note-taker (\"he will send me the contract\", \"she still owes me the numbers\", \"waiting on Tom for the review\"). When it is unclear, use 'me', and never invent a debt owed to the note-taker.",
@@ -82,19 +102,20 @@ export class ClaudeAdapter implements AiAdapter {
     ].join("\n");
 
     const userContent: Anthropic.ContentBlockParam[] = [];
-    if (input.imageBase64) {
+    // Label each photo so the model can refer to them, but the instructions above
+    // tell it the labels are upload order, not necessarily reading order.
+    images.forEach((img, i) => {
+      if (images.length > 1) userContent.push({ type: "text", text: `Photo ${i + 1} of ${images.length}:` });
       userContent.push({
         type: "image",
-        source: {
-          type: "base64",
-          media_type: (input.imageMediaType as "image/png" | "image/jpeg" | "image/webp" | "image/gif") || "image/png",
-          data: input.imageBase64,
-        },
+        source: { type: "base64", media_type: imageMedia(img.mediaType), data: img.base64 },
       });
-    }
+    });
     userContent.push({
       type: "text",
-      text: input.text || "Read the people and facts out of the attached image.",
+      text:
+        input.text ||
+        (images.length ? "Read the people and facts out of the attached photo(s)." : ""),
     });
 
     const message = await client().messages.create({

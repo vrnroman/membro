@@ -228,15 +228,22 @@ export function insertConflict(c: {
   reason: string | null;
 }): string | null {
   const d = db();
-  const nf = d.prepare("select created_at from facts where id = ?").get(c.newFactId) as { created_at: string } | undefined;
-  const of = d.prepare("select created_at from facts where id = ?").get(c.oldFactId) as { created_at: string } | undefined;
+  const nf = d.prepare("select rowid as rid, created_at from facts where id = ?").get(c.newFactId) as
+    | { rid: number; created_at: string }
+    | undefined;
+  const of = d.prepare("select rowid as rid, created_at from facts where id = ?").get(c.oldFactId) as
+    | { rid: number; created_at: string }
+    | undefined;
   if (!nf || !of) return null; // a fact was deleted out from under us; nothing to record
   let newId = c.newFactId;
   let oldId = c.oldFactId;
-  // Newer fact is new_fact_id. Tie-break on id when created_at is identical (same-
-  // millisecond captures) so orientation is deterministic and the unordered dedup
-  // below stays stable instead of depending on which crew job arrived first.
-  if (nf.created_at < of.created_at || (nf.created_at === of.created_at && c.newFactId < c.oldFactId)) {
+  // Newer fact is new_fact_id. When created_at is identical (one note filing both
+  // facts lands them in the same millisecond, which is common, not exotic) fall back
+  // to rowid: it increments with insertion order, so it says which fact really came
+  // second. This used to tie-break on the id, which is a random uuid, making the
+  // orientation a coin flip — the amber contradiction card could show Newer and
+  // Older swapped, and it made the crew test fail about half the time.
+  if (nf.created_at < of.created_at || (nf.created_at === of.created_at && nf.rid < of.rid)) {
     newId = c.oldFactId;
     oldId = c.newFactId;
   }
@@ -639,8 +646,12 @@ export function upsertBrief(b: { personId: string; body: string; sourceFactCount
 export function markBriefStale(personId: string): void {
   try {
     db().prepare("update briefs set stale = 1, updated_at = ? where person_id = ?").run(now(), personId);
+    // Their facts moved, so whatever made the last attempt fail may well be gone.
+    // Give them a clean slate rather than leaving them serving out a backoff (or
+    // permanently given up on) for a brief that no longer exists.
+    clearBriefAttempts(personId);
   } catch (e) {
-    console.error(`[briefs] could not mark brief stale for ${personId}: ${(e as Error).message}`);
+    console.error(`<3>[briefs] could not mark brief stale for ${personId}: ${(e as Error).message}`);
   }
 }
 
@@ -648,19 +659,82 @@ export function markBriefStale(personId: string): void {
 // with no brief at all, then the ones flagged stale, then the oldest. Skips the
 // diary self row (it is never a relationship). Bounded by the caller because each
 // brief is an AI call.
-export function listPeopleNeedingBrief(staleBeforeISO: string, limit: number): string[] {
+// Who the sweep should refresh next. The ordering still prefers people with no
+// brief at all — that part was always right — but it is now filtered by
+// brief_attempts, and that filter is load-bearing.
+//
+// Without it, a person whose generation always fails never gets a brief row, so
+// `(b.person_id is null) desc` sorts them first on EVERY tick, forever. Two such
+// people held both BATCH slots for 4.6 days in July 2026 and nobody else on the
+// list was ever reached. Backing a failure off takes them out of the running long
+// enough for the queue behind them to drain.
+// A failing person is held back by their BACKOFF, never excluded for good. That is
+// deliberate: an earlier cut of this dropped anyone past MAX_BRIEF_ATTEMPTS out of
+// the sweep permanently, which meant a *global* outage that is nobody's fault (a
+// read-only disk, an expired token — both are in the real corpus) would burn all 8
+// tries for all 9 people in about 16 hours and abandon every one of them, forever,
+// persisted across restarts. Fixing the disk would not bring them back.
+//
+// The backoff alone is what stops a storm: it saturates at 6h, so even a person who
+// can never be briefed costs ~4 calls a day. Permanent give-up bought nothing on top
+// of that and added an unrecoverable state, which is the very shape of the incident
+// this table exists to prevent. So it is gone.
+export function listPeopleNeedingBrief(staleBeforeISO: string, limit: number, nowISO: string = now()): string[] {
   const rows = db()
     .prepare(
       `select p.id as id
        from people p
        left join briefs b on b.person_id = p.id
+       left join brief_attempts ba on ba.person_id = p.id
        where p.id != @self
          and (b.person_id is null or b.stale = 1 or b.generated_at < @cutoff)
+         and (ba.person_id is null or ba.next_attempt_at <= @now)
        order by (b.person_id is null) desc, b.stale desc, b.generated_at asc
        limit @limit`,
     )
-    .all({ self: SELF_ID, cutoff: staleBeforeISO, limit }) as { id: string }[];
+    .all({ self: SELF_ID, cutoff: staleBeforeISO, limit, now: nowISO }) as { id: string }[];
   return rows.map((r) => r.id);
+}
+
+export type BriefAttemptRow = {
+  person_id: string;
+  attempts: number;
+  next_attempt_at: string;
+  last_error: string | null;
+};
+
+export function getBriefAttempt(personId: string): BriefAttemptRow | null {
+  return (
+    (db()
+      .prepare("select person_id, attempts, next_attempt_at, last_error from brief_attempts where person_id = ?")
+      .get(personId) as BriefAttemptRow | undefined) ?? null
+  );
+}
+
+/**
+ * Remember that this person's brief failed, and hold them out of the sweep until
+ * `nextAttemptAtISO`. Only for failures that are ABOUT this person: a quota outage
+ * is the engine being down, not a bad brief, and must never burn an attempt (that
+ * would spend all 8 tries during an outage and abandon everyone permanently).
+ */
+export function recordBriefFailure(personId: string, error: string, attempts: number, nextAttemptAtISO: string): void {
+  const ts = now();
+  db()
+    .prepare(
+      `insert into brief_attempts (person_id, attempts, next_attempt_at, last_error, updated_at)
+       values (@personId, @attempts, @next, @error, @ts)
+       on conflict(person_id) do update set
+         attempts = excluded.attempts,
+         next_attempt_at = excluded.next_attempt_at,
+         last_error = excluded.last_error,
+         updated_at = excluded.updated_at`,
+    )
+    .run({ personId, attempts, next: nextAttemptAtISO, error: error.slice(0, 500), ts });
+}
+
+/** Wipe the failure record. Called on success, and whenever the facts change. */
+export function clearBriefAttempts(personId: string): void {
+  db().prepare("delete from brief_attempts where person_id = ?").run(personId);
 }
 
 // ── Diary (the owner's own thread on the reserved self row) ───────────────────

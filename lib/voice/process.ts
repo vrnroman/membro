@@ -4,10 +4,12 @@ import {
   type VoiceJob,
   markTranscribed,
   rescheduleJob,
+  parkVoiceJob,
   markJobDone,
   markJobFailed,
 } from "./queue";
 import { bgBackoffMs, MAX_BG_ATTEMPTS } from "./policy";
+import { QuotaExhaustedError, AdapterError, ENGINE_RETRY_MS, PARK_MAX_AGE_MS } from "@/lib/ai/quota";
 
 // Drive one parked voice note one step further toward "filed", then either
 // finish it, park it again with a longer backoff, or give up. Two stages, and
@@ -19,6 +21,21 @@ import { bgBackoffMs, MAX_BG_ATTEMPTS } from "./policy";
 
 function isoIn(ms: number): string {
   return new Date(Date.now() + ms).toISOString();
+}
+
+/**
+ * The backstop on parking: a park spends no attempts, so a job held by a fault we
+ * wrongly judged global would retry forever, never done and never failed. Past
+ * PARK_MAX_AGE_MS (10 days, beyond the 7-day weekly limit parking exists for) it
+ * gives up instead, so every fault class terminates.
+ */
+function parkedTooLong(job: VoiceJob, reason: string): boolean {
+  const age = Date.now() - Date.parse(job.created_at);
+  if (!Number.isFinite(age) || age <= PARK_MAX_AGE_MS) return false;
+  const days = Math.round(age / 86400_000);
+  markJobFailed(job.id, `gave up after ${days}d parked: ${reason}`);
+  console.error(`<3>[voice-worker] job ${job.id} parked ${days}d without recovering, giving up: ${reason}`);
+  return true;
 }
 
 /** Bump attempts + push the next try out, or mark failed once we've tried enough. */
@@ -69,6 +86,32 @@ export async function processJob(job: VoiceJob): Promise<void> {
     await fileNote({ text, sourceType: "voice" });
     markJobDone(job.id);
   } catch (e) {
+    // Out of quota is not a hiccup and not this note's fault. Park it until the
+    // engine is back without spending an attempt: MAX_BG_ATTEMPTS buys ~10h on the
+    // assumption that "a quota reset lands well inside that", which is false for a
+    // WEEKLY limit. Charging it here marks the job failed, and a failed job is
+    // never re-claimed, so the transcript survives but is never filed and the
+    // person it was about silently loses that history for good.
+    if (e instanceof QuotaExhaustedError) {
+      if (!parkedTooLong(job, `out of AI quota: ${e.raw}`)) {
+        parkVoiceJob(job.id, e.resetAt.toISOString(), `paused, out of AI quota: ${e.raw}`);
+        console.error(`<3>[voice-worker] job ${job.id} parked until ${e.resetAt.toISOString()}, out of AI quota`);
+      }
+      return;
+    }
+    // Same rule for the engine being broken rather than out of credit: the model was
+    // never reached (read-only disk, dead token), so this note did nothing wrong.
+    // Both faults are persistent, so they always outlast the ~10h give-up bound, and
+    // a failed voice job keeps its transcript but is never filed — the person it was
+    // about silently loses that history for good.
+    if (e instanceof AdapterError && e.global) {
+      if (!parkedTooLong(job, `AI engine unavailable: ${e.raw}`)) {
+        const at = new Date(Date.now() + ENGINE_RETRY_MS).toISOString();
+        parkVoiceJob(job.id, at, `paused, AI engine unavailable: ${e.raw}`);
+        console.error(`<3>[voice-worker] job ${job.id} parked until ${at}, AI engine unavailable: ${e.raw}`);
+      }
+      return;
+    }
     // Extraction (Claude) hiccuped — the transcript is stored, so this only
     // retries the filing step.
     backOffOrGiveUp(job, (e as Error).message);

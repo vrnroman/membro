@@ -43,15 +43,7 @@ export async function generateBriefFor(personId: string): Promise<BriefContent |
     today,
   });
 
-  // Prepend the deterministic, never-hallucinated insight lines. Only the STABLE
-  // cadence goes in (no absolute "N days ago" — that would be frozen into the
-  // cache and read wrong as the days pass); recency is served by Warm-Keeper and
-  // the new-since line below.
-  const lead: string[] = [];
-  if (cadenceDays !== null) lead.push(`You usually talk about every ${cadenceDays} days.`);
-  if (newFacts.length) {
-    lead.push(`${newFacts.length} new ${newFacts.length === 1 ? "note" : "notes"} since your last prep.`);
-  }
+  const lead = deterministicLead(cadenceDays, newFacts.length);
 
   const content: BriefContent = {
     read: out.read,
@@ -73,6 +65,49 @@ export async function generateBriefFor(personId: string): Promise<BriefContent |
   upsertBrief({ personId, body: JSON.stringify(content), sourceFactCount: rows.length });
   if (changedDuringGen) markBriefStale(personId);
   return content;
+}
+
+// The deterministic, never-hallucinated insight lines. Only the STABLE cadence
+// goes in (no absolute "N days ago" — that would be frozen into the cache and read
+// wrong as the days pass); recency is served by Warm-Keeper and the new-since line.
+//
+// Pulled out into its own function because it is the half of a brief that needs no
+// model at all, which makes it the half that still works when the engine is out of
+// quota. See deterministicBriefFor below.
+export function deterministicLead(cadenceDays: number | null, newFactCount: number): string[] {
+  const lead: string[] = [];
+  if (cadenceDays !== null) lead.push(`You usually talk about every ${cadenceDays} days.`);
+  if (newFactCount) lead.push(`${newFactCount} new ${newFactCount === 1 ? "note" : "notes"} since your last prep.`);
+  return lead;
+}
+
+/**
+ * The half of a Pre-Read that costs nothing: who they are (straight off their
+ * row) and the counted lines above. No model call, so it works while the engine is
+ * parked.
+ *
+ * Deliberately NOT persisted, and the caller must not persist it either. upsertBrief
+ * writes stale=0, so storing a partial would make it look like a fresh, complete
+ * brief, keep it out of the sweep for two whole days, and quietly present half a
+ * read as the whole thing. That is the exact failure this run exists to remove, so
+ * it is built at read time and thrown away.
+ */
+export function deterministicBriefFor(personId: string): BriefContent | null {
+  if (personId === SELF_ID) return null;
+  const person = getPerson(personId);
+  if (!person) return null;
+
+  const rows = listFactsForPerson(personId);
+  const cached = getBrief(personId);
+  const cadenceDays = contactCadenceDays(rows.map((r) => r.created_at));
+  const newFactCount = cached ? rows.filter((r) => r.created_at > cached.generated_at).length : 0;
+
+  const who = [person.name, person.role, person.company && `at ${person.company}`].filter(Boolean).join(", ");
+  return {
+    read: person.blurb ? `${who}. ${person.blurb}` : `${who}.`,
+    insights: deterministicLead(cadenceDays, newFactCount),
+    recommendations: [],
+  };
 }
 
 // A cheap fingerprint of a person's facts, so a regeneration can tell whether the

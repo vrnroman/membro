@@ -32,6 +32,11 @@ export function PersonProfile({ personId }: { personId: string }) {
   const [briefMeta, setBriefMeta] = useState<{ generatedAt: string | null; stale: boolean } | null>(null);
   const [briefing, setBriefing] = useState(false);
   const [briefError, setBriefError] = useState<string | null>(null);
+  // Out of quota is its own state, not an error. It gets a calm line and a "back
+  // at" instead of the red bug text, because it is neither a bug nor permanent.
+  const [quota, setQuota] = useState<{ pausedUntil: string | null } | null>(null);
+  // True when the read on screen is the deterministic half only (no model).
+  const [partial, setPartial] = useState(false);
   const [newNote, setNewNote] = useState("");
   const [copied, setCopied] = useState(false);
   // First-open guard: auto-build a Pre-Read once when none is cached, without
@@ -39,6 +44,13 @@ export function PersonProfile({ personId }: { personId: string }) {
   const autoTried = useRef(false);
 
   async function load() {
+    // Clear the per-brief states before adopting another person's data. They are
+    // about the brief on screen, not about the app, so leaving them set would carry
+    // the last person's "notes only" stamp and quota line onto the next one and
+    // suppress their real age stamp.
+    setQuota(null);
+    setPartial(false);
+    setBriefError(null);
     const res = await fetch(`/api/people/${personId}`, { cache: "no-store" });
     if (!res.ok) {
       setPerson(null);
@@ -76,6 +88,22 @@ export function PersonProfile({ personId }: { personId: string }) {
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "brief failed");
+
+      // The engine is parked. Say so plainly and keep whatever is already on
+      // screen: a real cached read beats the deterministic half, and replacing it
+      // would lose information for no reason.
+      if (data.quota) {
+        setQuota({ pausedUntil: data.quota.pausedUntil ?? null });
+        if (!brief && data.brief) {
+          setBrief(data.brief as BriefContent);
+          setPartial(true);
+          setBriefMeta({ generatedAt: null, stale: false });
+        }
+        return;
+      }
+
+      setQuota(null);
+      setPartial(false);
       setBrief(data.brief as BriefContent);
       setBriefMeta({ generatedAt: data.generatedAt ?? null, stale: false });
     } catch (e) {
@@ -180,9 +208,13 @@ export function PersonProfile({ personId }: { personId: string }) {
         <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
           <div className="flex items-baseline gap-2">
             <span className="text-sm font-medium">Pre-Read</span>
-            {briefMeta?.generatedAt && !briefing && (
+            {/* Only stamp an age on a real generated read. A deterministic partial
+                has no generation time, and borrowing one would be the same quiet
+                lie as the old "refreshed 2 brief(s)". */}
+            {briefMeta?.generatedAt && !partial && !briefing && (
               <span className="text-xs text-muted-foreground">{agoLabel(briefMeta.generatedAt)}</span>
             )}
+            {partial && !briefing && <span className="text-xs text-muted-foreground">notes only</span>}
           </div>
           <div className="flex items-center gap-1">
             {brief && (
@@ -208,6 +240,17 @@ export function PersonProfile({ personId }: { personId: string }) {
         {briefMeta?.stale && brief && !briefing && (
           <p className="mb-3 text-xs text-amber-600 dark:text-amber-400">
             Facts changed since this was written. Refresh for the current read.
+          </p>
+        )}
+
+        {/* Waiting is not breaking. A quota pause gets a quiet line and a time,
+            never the red bug text: the app is fine, it is just out of credit. */}
+        {quota && !briefing && (
+          <p className="mb-3 text-xs text-muted-foreground">
+            {partial
+              ? "The counted lines below are all Membro can write without AI. "
+              : "Kept the last read, this could not refresh. "}
+            AI is out of quota{quota.pausedUntil ? `, back ${resetLabel(quota.pausedUntil)}` : ", it will retry on its own"}.
           </p>
         )}
 
@@ -419,6 +462,16 @@ function BriefBlock({ title, items }: { title: string; items: string[] }) {
       </ul>
     </div>
   );
+}
+
+// When the AI comes back, in the owner's own timezone. The CLI states the reset in
+// UTC, which is not the clock he is looking at, so translate rather than parrot it.
+function resetLabel(iso: string): string {
+  const at = new Date(iso);
+  if (Number.isNaN(at.getTime())) return "soon";
+  const time = at.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
+  const sameDay = at.toDateString() === new Date().toDateString();
+  return sameDay ? `at ${time}` : `${at.toLocaleDateString(undefined, { weekday: "short" })} at ${time}`;
 }
 
 // "updated Xd ago" stamp from an ISO timestamp; empty for a missing/bad value.

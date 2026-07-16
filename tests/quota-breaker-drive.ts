@@ -8,6 +8,17 @@
 // and whose usage is all zeros). Nothing is mocked above the process boundary.
 process.env.MEMBRO_AI = "cli";
 
+// This suite deliberately trips the quota breaker over and over, and a trip fires
+// the real Telegram announce. On a dev laptop there are no credentials so the send
+// throws instantly and harmlessly — but the VM's .env HAS them, so running `npm test`
+// there would message the owner for real, and would leave a 12s network fetch
+// in-flight that the announceInFlight guard then (correctly) collapses, making the
+// injected-sender checks below fail depending on where they ran. Both problems have
+// the same one-line cure: no credentials, so sendTelegramMessage always fails fast
+// and offline. The delivery path itself is covered by injecting a Sender.
+delete process.env.TELEGRAM_BOT_TOKEN;
+delete process.env.TELEGRAM_CHAT_ID;
+
 import { mkdtempSync, writeFileSync, chmodSync, readFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";

@@ -273,17 +273,25 @@ JSON
 
     const errs: string[] = [];
     const realErr = console.error;
+    const announces = () => errs.filter((l) => /could not announce pause/.test(l)).length;
     console.error = (...a: unknown[]) => {
       errs.push(a.map(String).join(" "));
     };
+    let attempts = 0;
     try {
       for (let i = 0; i < 6; i++) {
         await adapter.brief(input).catch(() => {});
       }
+      // The announce is fire-and-forget (a lazy import, then a send), so its log
+      // lands a few ticks after the call that triggered it. Wait for the signal
+      // rather than assuming it has arrived: reading too early passed on a laptop
+      // and failed on the VM, which is a flaky test, not a check.
+      const deadline = Date.now() + 3000;
+      while (announces() < 2 && Date.now() < deadline) await new Promise((r) => setTimeout(r, 25));
+      attempts = announces();
     } finally {
       console.error = realErr;
     }
-    const attempts = errs.filter((l) => /could not announce pause/.test(l)).length;
     check("the park really is days long (so no probe would re-announce on its own)", isQuotaBlocked());
     check(
       "a failed alert is retried on the blocked path, not left silent for days",

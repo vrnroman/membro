@@ -1,7 +1,8 @@
 import { NextResponse } from "next/server";
-import { generateBriefFor } from "@/lib/briefs/generate";
+import { generateBriefFor, deterministicBriefFor } from "@/lib/briefs/generate";
 import { getBrief } from "@/lib/repo";
 import { getAdapter } from "@/lib/ai";
+import { QuotaExhaustedError } from "@/lib/ai/quota";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -25,6 +26,20 @@ export async function POST(req: Request) {
       adapter: getAdapter().label,
     });
   } catch (e) {
+    // Out of quota is not a failure, it is a known state with a known end. Answer
+    // 200 with what we CAN say (who they are, the counted lines) plus when the
+    // engine is back, so the profile can show something calm and true instead of a
+    // red error that reads like a bug. Before this, a four-day outage rendered as
+    // "Could not refresh: no JSON object in claude -p output".
+    if (e instanceof QuotaExhaustedError) {
+      return NextResponse.json({
+        brief: deterministicBriefFor(personId),
+        partial: true,
+        quota: { pausedUntil: e.resetParsed ? e.resetAt.toISOString() : null, raw: e.raw },
+        generatedAt: null,
+        adapter: getAdapter().label,
+      });
+    }
     return NextResponse.json({ error: `brief failed: ${(e as Error).message}` }, { status: 502 });
   }
 }

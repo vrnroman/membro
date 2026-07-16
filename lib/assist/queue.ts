@@ -82,6 +82,24 @@ export function rescheduleAssistJob(id: string, nextAttemptAt: string, error: st
     .run(nextAttemptAt, error, now(), id);
 }
 
+/**
+ * Push a job out WITHOUT spending an attempt. For a failure that is not the job's
+ * fault and that no number of retries can fix sooner: the AI engine itself is out
+ * of quota.
+ *
+ * Without this, a global outage is charged to every individual note. The backoff
+ * is 30s/60s/.../600s, so eight tries elapse about 35 minutes in, and every note
+ * captured during the July-style 4.6-day outage would be marked 'failed' — a
+ * terminal state the queue never re-selects. The owner's drafts, diary entries,
+ * Researcher briefs and Ledger checks would be gone for good, and returning quota
+ * would not bring back a single one.
+ */
+export function parkAssistJob(id: string, nextAttemptAt: string, reason: string): void {
+  db()
+    .prepare("update assist_jobs set next_attempt_at = ?, last_error = ?, updated_at = ? where id = ?")
+    .run(nextAttemptAt, reason, now(), id);
+}
+
 export function markAssistJobDone(id: string): void {
   db().prepare("update assist_jobs set status = 'done', updated_at = ? where id = ?").run(now(), id);
 }

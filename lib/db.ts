@@ -172,6 +172,23 @@ create table if not exists briefs (
   updated_at        text not null
 );
 
+-- Retry discipline for the Pre-Read sweep, mirroring assist_jobs. A brief row only
+-- exists once generation SUCCEEDS, so before this table a person who always failed
+-- had nowhere to record that fact: listPeopleNeedingBrief sorts never-briefed
+-- people first, so the same two re-took both batch slots on every tick, forever.
+-- In July 2026 that froze the whole cache for 4.6 days (seven of nine people had no
+-- brief) while the worker burned 576 calls a day. This is where a failure is
+-- remembered, so a person who cannot be briefed backs off and yields the slot
+-- instead of blocking everyone behind them.
+create table if not exists brief_attempts (
+  person_id       text primary key references people (id) on delete cascade,
+  attempts        integer not null default 0,
+  next_attempt_at text not null,                 -- not due again until this passes
+  last_error      text,                          -- the real reason, kept for the profile card
+  updated_at      text not null
+);
+create index if not exists brief_attempts_due_idx on brief_attempts (next_attempt_at);
+
 -- Ledger Catch: a pending "possible contradiction" the per-note crew's Ledger
 -- member found between a newly filed fact and one already on file for the same
 -- person. The profile shows the two side by side with keep-new / keep-old /

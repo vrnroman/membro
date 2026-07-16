@@ -85,6 +85,22 @@ export function markTranscribed(id: string, transcript: string): void {
     .run(transcript, now(), id);
 }
 
+/**
+ * Push the next try out WITHOUT spending an attempt: the engine is out of quota,
+ * which is not this note's fault and which retrying cannot fix any sooner.
+ *
+ * MAX_BG_ATTEMPTS buys ~10h, and policy.ts used to justify that with "a quota reset
+ * lands well inside that". A WEEKLY limit does not: it can be days out. Charging it
+ * to the job marks the note 'failed' — a state the queue never re-selects — so the
+ * transcript survives but is never filed, and that person silently loses the
+ * history forever.
+ */
+export function parkVoiceJob(id: string, nextAttemptAt: string, reason: string): void {
+  db()
+    .prepare("update voice_jobs set next_attempt_at = ?, last_error = ?, updated_at = ? where id = ?")
+    .run(nextAttemptAt, reason, now(), id);
+}
+
 /** Bump the attempt count and push the next try out to `nextAttemptAt`. */
 export function rescheduleJob(id: string, nextAttemptAt: string, error: string): void {
   db()

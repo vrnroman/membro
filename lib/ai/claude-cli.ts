@@ -19,6 +19,15 @@ import {
   sanitizeConflicts,
   Signal,
 } from "./types";
+import {
+  AdapterError,
+  type ClaudeEnvelope,
+  classifyEnvelope,
+  isGlobalFaultText,
+  QuotaExhaustedError,
+  quotaBlock,
+  tripQuotaBreaker,
+} from "./quota";
 
 // Runs Membro's thinking through your Claude Code subscription via `claude -p`
 // instead of the Anthropic API. Works wherever the `claude` CLI is installed and
@@ -38,32 +47,142 @@ function enqueue<T>(fn: () => Promise<T>): Promise<T> {
   return run as Promise<T>;
 }
 
+// Spawn one CLI run. Resolves with whatever came back on stdout plus the exec
+// error, if any — deciding what that MEANS is classifyEnvelope's job, not this
+// function's. The old code made that judgement here and got it wrong: it treated
+// "exited non-zero but printed something" as success, which is exactly how a
+// four-day quota outage came out the other end as a JSON parse error.
+function spawnClaude(
+  prompt: string,
+  extraArgs: string[],
+): Promise<{ stdout: string; stderr: string; err: Error | null }> {
+  return new Promise((resolve) => {
+    const args = ["-p", prompt, "--output-format", "json", ...extraArgs];
+    if (MODEL) args.push("--model", MODEL);
+    // stderr is kept because it is where a logged-out or missing CLI says so, and
+    // that is exactly the difference between "park this note" and "destroy it".
+    execFile(BIN, args, { maxBuffer: 16 * 1024 * 1024, timeout: 120_000 }, (err, stdout, stderr) => {
+      resolve({ stdout: stdout ?? "", stderr: stderr ?? "", err: err ?? null });
+    });
+  });
+}
+
+/**
+ * Decide whether a failed spawn is the ENGINE being broken, from the process's own
+ * evidence ONLY: its exit code and its stderr.
+ *
+ * `err.message` is deliberately excluded, and that exclusion is the whole point.
+ * Node builds it by echoing the command line back — "Command failed: claude -p
+ * <THE ENTIRE PROMPT> --output-format json" — so the owner's note and the person's
+ * facts end up inside it. Matching fault words against that string means the NOTE
+ * decides how the failure is handled: "Meeting with Sam moved to room 401" matched
+ * \b401\b, "Tom is sending the API credentials" matched credentials, a link ending
+ * in /login matched too. Each one would park a perfectly ordinary note for ten days
+ * and log it as "AI engine unavailable" while the disk and token were fine. Same
+ * reason stdout is excluded: it is the model's own text.
+ *
+ * stderr and the exit code are the CLI talking about itself, and nothing else.
+ */
+export function isGlobalFault(err: Error, stderr: string): boolean {
+  const code = (err as NodeJS.ErrnoException).code;
+  // A missing binary reports ENOENT on the code; its message would leak the prompt.
+  if (code && /^(ENOENT|EACCES)$/.test(code)) return true;
+  return isGlobalFaultText(stderr);
+}
+
 function runClaude(prompt: string, extraArgs: string[] = []): Promise<string> {
-  return enqueue(
-    () =>
-      new Promise<string>((resolve, reject) => {
-        const args = ["-p", prompt, "--output-format", "json", ...extraArgs];
-        if (MODEL) args.push("--model", MODEL);
-        execFile(
-          BIN,
-          args,
-          { maxBuffer: 16 * 1024 * 1024, timeout: 120_000 },
-          (err, stdout) => {
-            if (err && !stdout) {
-              reject(new Error(`claude -p failed: ${err.message} (is the Claude CLI installed and logged in?)`));
-              return;
-            }
-            // `--output-format json` wraps the answer in {type:"result", result:"..."}.
-            try {
-              const parsed = JSON.parse(stdout);
-              resolve(typeof parsed?.result === "string" ? parsed.result : stdout);
-            } catch {
-              resolve(stdout);
-            }
-          },
-        );
-      }),
-  );
+  return enqueue(async () => {
+    // Check the breaker INSIDE the queue slot, not before enqueuing: calls that
+    // lined up behind a run that then tripped it must see the trip, or the first
+    // wave after a limit still spawns a process each.
+    const blocked = quotaBlock();
+    if (blocked) {
+      // Retry the off-app alert from here too, not only from the trip below. This
+      // path is the ONLY one a call takes once the breaker is open, so if the first
+      // announce failed (a Telegram blip at the exact moment the limit hit) there is
+      // otherwise no second chance until the breaker self-clears — and for the dated
+      // wording, which is the common one, that is DAYS away. One blip would buy the
+      // same silence this whole run exists to delete. The kv marker makes it a
+      // no-op once a message has actually landed.
+      void announceQuotaPause(blocked.raw, blocked.resetAt, blocked.resetParsed);
+      throw new QuotaExhaustedError(blocked.raw, blocked.resetAt, blocked.resetParsed);
+    }
+
+    const { stdout, stderr, err } = await spawnClaude(prompt, extraArgs);
+
+    // Nothing at all came back: the binary is missing, not logged in, or it was
+    // killed (the 120s timeout). No envelope to reason about — so read the wording.
+    // A logged-out CLI exits 1 with stderr only and no envelope at all, which is the
+    // SAME real-world fault as the 401 that does arrive wrapped in one. Getting this
+    // wrong destroys notes: the shape with an envelope was parked while this shape
+    // burned its eight tries and marked the note permanently failed, so logging back
+    // in would not bring it back. A timeout is deliberately NOT global: the model may
+    // well have been running, so that stays a per-request failure.
+    if (err && !stdout.trim()) {
+      throw new AdapterError(
+        `${err.message}${stderr.trim() ? `: ${stderr.trim().slice(0, 200)}` : ""} (is the Claude CLI installed and logged in?)`,
+        isGlobalFault(err, stderr),
+      );
+    }
+
+    // `--output-format json` wraps the answer in {type:"result", result:"...", usage:{...}}.
+    let env: ClaudeEnvelope | null = null;
+    try {
+      env = JSON.parse(stdout) as ClaudeEnvelope;
+    } catch {
+      env = null; // an older CLI, or a truncated write: classify on the raw text
+    }
+
+    // Exited badly AND produced no readable envelope: that is a killed or truncated
+    // run (the 120s timeout, a 16MB maxBuffer overflow), not an answer. Say what
+    // actually happened. Letting it through would report a dead process as a
+    // successful generation and then fail downstream as "no JSON object", which is
+    // precisely the misdiagnosis that hid the July outage for four days.
+    if (err && !env) {
+      throw new AdapterError(
+        `${err.message} (partial output: ${stdout.trim().slice(0, 200)})`,
+        isGlobalFault(err, stderr),
+      );
+    }
+
+    const c = classifyEnvelope(env, stdout, Date.now());
+    if (c.kind === "quota") {
+      // Trip first, THEN notify, and only on the transition: the whole point is
+      // that the next 576 calls do not each rediscover this.
+      if (tripQuotaBreaker(c.raw, c.resetAt, c.resetParsed)) void announceQuotaPause(c.raw, c.resetAt, c.resetParsed);
+      throw new QuotaExhaustedError(c.raw, c.resetAt, c.resetParsed);
+    }
+    if (c.kind === "error") {
+      throw new AdapterError(err ? `${c.raw} (exit: ${err.message})` : c.raw, c.global);
+    }
+    // A real generation got through. If we told the owner the brain was parked,
+    // tell him it is back — keyed off an actual success, not merely the clock
+    // passing the reset time, because the reset time is sometimes a guess.
+    void announceQuotaResumed();
+    return c.text;
+  });
+}
+
+// Tell the owner once, off-app, that the engine is parked — the gap this whole
+// run exists to close (last time he had no signal for 4.6 days). Imported lazily
+// and never awaited: a Telegram outage must not take the AI path down with it,
+// and this module is on the import path of every adapter call.
+async function announceQuotaPause(raw: string, resetAt: Date, resetParsed: boolean): Promise<void> {
+  try {
+    const { notifyQuotaPaused } = await import("@/lib/nightshift/quota-alert");
+    await notifyQuotaPaused(raw, resetAt, resetParsed);
+  } catch (e) {
+    console.error(`<3>[quota] could not announce pause: ${(e as Error).message}`);
+  }
+}
+
+async function announceQuotaResumed(): Promise<void> {
+  try {
+    const { notifyQuotaResumed } = await import("@/lib/nightshift/quota-alert");
+    await notifyQuotaResumed();
+  } catch (e) {
+    console.error(`<3>[quota] could not announce resume: ${(e as Error).message}`);
+  }
 }
 
 // Browser media type -> file extension, so the temp file the CLI reads has an

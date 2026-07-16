@@ -88,6 +88,27 @@ async function main() {
     console.log(`${failures} check(s) FAILED`);
     process.exit(1);
   }
+
+  // Same-millisecond orientation. One note routinely files both facts inside a
+  // single millisecond, and the tie-break used to compare the two random uuids, so
+  // the amber card had a ~50% chance of showing Newer and Older swapped (it made
+  // tests/crew.ts fail about half the time). rowid follows insertion order, so the
+  // fact filed second is the newer one, every time. 20 rounds: the old code would
+  // almost certainly lose at least one.
+  {
+    const { insertPerson, insertFact, insertConflict, listPendingConflictsForPerson } = await import("@/lib/repo");
+    let wrong = 0;
+    for (let i = 0; i < 20; i++) {
+      const { id: pid } = insertPerson({ name: `Same Ms ${i}` });
+      const oldId = insertFact({ person_id: pid, kind: "preference", content: "Loves coffee" });
+      const newId = insertFact({ person_id: pid, kind: "preference", content: "Hates coffee now" });
+      insertConflict({ personId: pid, newFactId: newId, oldFactId: oldId, reason: "r" });
+      const [c] = listPendingConflictsForPerson(pid);
+      if (!c || c.newFact.id !== newId || c.oldFact.id !== oldId) wrong++;
+    }
+    check("same-millisecond facts orient by insertion order, 20/20", wrong === 0, `wrong=${wrong}/20`);
+  }
+
   console.log("All ledger checks passed.");
 }
 

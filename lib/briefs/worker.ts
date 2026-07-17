@@ -1,7 +1,8 @@
-import { listPeopleNeedingBrief, recordBriefFailure, clearBriefAttempts, getBriefAttempt } from "@/lib/repo";
+import { listPeopleNeedingBrief, recordBriefFailure, clearBriefAttempts, getBriefAttempt, listPeopleIdName } from "@/lib/repo";
+import { SELF_ID } from "@/lib/nightshift/scout";
 import { generateBriefFor, BRIEF_STALE_DAYS } from "./generate";
 import { briefBackoffMs, MAX_BRIEF_ATTEMPTS } from "./policy";
-import { QuotaExhaustedError, quotaBlock } from "@/lib/ai/quota";
+import { QuotaExhaustedError, AdapterError, quotaBlock } from "@/lib/ai/quota";
 
 // Background Pre-Read refresh: the sibling of lib/assist/worker.ts. It keeps the
 // briefs cache warm so opening any profile is instant and reflects the latest
@@ -55,6 +56,19 @@ async function tick(): Promise<void> {
 
     const cutoff = new Date(Date.now() - BRIEF_STALE_DAYS * 86400000).toISOString();
     const due = listPeopleNeedingBrief(cutoff, BATCH);
+
+    // A recorded engine fault with nothing due would otherwise never re-probe: the
+    // loop below only runs when a brief is due, so a broken engine that broke while
+    // every brief was fresh (and nothing new is captured) would stay silent until a
+    // brief ages past staleness — up to BRIEF_STALE_DAYS of the exact silence this
+    // exists to prevent. So when a fault is pending and nothing is due, probe one
+    // real person on purpose. If the engine is still down it re-fails (and the alert
+    // fires once past the bar); if it recovered, the success clears the fault. One
+    // extra call per 5-min tick during an outage is bounded and self-limiting.
+    if (!due.length && (await engineFaultPendingSafe())) {
+      const anyone = listPeopleIdName().find((p) => p.id !== SELF_ID);
+      if (anyone) due.push(anyone.id);
+    }
     let refreshed = 0;
 
     for (const personId of due) {
@@ -69,6 +83,20 @@ async function tick(): Promise<void> {
           // on someone whose brief is perfectly fine. Stop the batch instead —
           // everyone behind them would fail identically.
           console.error(`<3>[brief-worker] paused, out of AI quota: ${e.message}`);
+          break;
+        }
+        if (e instanceof AdapterError && e.global) {
+          // The engine is BROKEN, not out of credit (read-only disk, dead login).
+          // Same shape as quota: not this person's fault, and everyone behind them
+          // would hit the identical wall, so stop the batch and DON'T record a
+          // failure against them. This tick just probed and failed for real, so it
+          // is the right place to drive the persistence-gated alert — the fault was
+          // first noted at the adapter chokepoint, and this fires the Telegram only
+          // once it has outlived the wall-clock bar. Re-probing one person per tick
+          // (~1 zero-token fast-fail) is what also detects recovery, exactly like
+          // the quota path; it is not the 576/day storm.
+          console.error(`<3>[brief-worker] paused, AI engine unavailable: ${e.message}`);
+          void alertEngineFault();
           break;
         }
         // A real, person-specific failure. Remember it, back them off, and let the
@@ -106,6 +134,28 @@ async function retryQuotaAnnounce(raw: string, resetAt: Date, resetParsed: boole
     await notifyQuotaPaused(raw, resetAt, resetParsed);
   } catch (e) {
     console.error(`<3>[brief-worker] could not announce quota pause: ${(e as Error).message}`);
+  }
+}
+
+// Fire the engine-fault alert IF it has persisted past the bar. Driven from here
+// because this tick just probed and failed for real, so the alert is always backed
+// by a live failing probe (it cannot cry wolf for an already-healed fault). Lazy +
+// unawaited: the alert path reaches the DB and network and must not stall the tick.
+async function alertEngineFault(): Promise<void> {
+  try {
+    const { maybeAlertEngineFault } = await import("@/lib/nightshift/quota-alert");
+    await maybeAlertEngineFault();
+  } catch (e) {
+    console.error(`<3>[brief-worker] could not alert engine fault: ${(e as Error).message}`);
+  }
+}
+
+async function engineFaultPendingSafe(): Promise<boolean> {
+  try {
+    const { engineFaultPending } = await import("@/lib/nightshift/quota-alert");
+    return engineFaultPending();
+  } catch {
+    return false;
   }
 }
 

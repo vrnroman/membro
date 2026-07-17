@@ -86,11 +86,19 @@ export class QuotaExhaustedError extends Error {
 export class AdapterError extends Error {
   readonly raw: string;
   readonly global: boolean;
-  constructor(raw: string, isGlobal = false) {
+  // The CLEAN fault text: stderr, an err.code label, or the CLI's synthetic reply.
+  // NEVER err.message or stdout — node echoes the whole prompt into err.message, so
+  // describing a fault from `raw` would let the owner's note pick the cause (a note
+  // mentioning "read-only" would make a login outage read as a disk problem). This
+  // is the same contamination isGlobalFault guards against; describeGlobalFault must
+  // only ever see this field.
+  readonly faultSignal: string;
+  constructor(raw: string, isGlobal = false, faultSignal = "") {
     super(`claude -p returned no usable output: ${raw}`);
     this.name = "AdapterError";
     this.raw = raw;
     this.global = isGlobal;
+    this.faultSignal = faultSignal || raw;
   }
 }
 
@@ -174,6 +182,28 @@ const GLOBAL_FAULT_RE =
  */
 export function isGlobalFaultText(raw: string): boolean {
   return GLOBAL_FAULT_RE.test(raw);
+}
+
+/**
+ * Turn a raw global-fault string into a plain cause and where to act, for the alert
+ * and the profile card. It names the cause and points at the VM; it deliberately
+ * does NOT hand over a command to paste. `claude login` is actively wrong here (the
+ * service runs on an OAuth token the interactive CLI does not use), and the real
+ * EROFS case was fixed by a systemd ReadWritePaths change, not a one-liner. A
+ * confidently wrong instruction wastes more time than an honest "look here", and it
+ * rots on the next infra change; a description does not.
+ */
+export function describeGlobalFault(raw: string): { cause: string; action: string } {
+  const r = raw.toLowerCase();
+  if (/erofs|read-only file system/.test(r))
+    return { cause: "the disk it writes to is read-only", action: "check the VM disk and the service's write paths" };
+  if (/\b401\b|\b403\b|unauthorized|invalid authentication|authentication_error|invalid api key|\/login|claude login|not logged ?in|logged out|credentials/.test(r))
+    return { cause: "its login has expired", action: "re-authenticate the Claude CLI on the VM" };
+  if (/credit balance/.test(r))
+    return { cause: "the account is out of credit", action: "top up the Claude account" };
+  if (/enoent|command not found|eacces/.test(r))
+    return { cause: "the Claude CLI is missing or not runnable", action: "check the Claude CLI install on the VM" };
+  return { cause: "the AI engine is not responding", action: "check the service on the VM" };
 }
 
 /**

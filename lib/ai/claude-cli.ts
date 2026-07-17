@@ -119,9 +119,10 @@ function runClaude(prompt: string, extraArgs: string[] = []): Promise<string> {
     // in would not bring it back. A timeout is deliberately NOT global: the model may
     // well have been running, so that stays a per-request failure.
     if (err && !stdout.trim()) {
-      throw new AdapterError(
+      failAdapter(
         `${err.message}${stderr.trim() ? `: ${stderr.trim().slice(0, 200)}` : ""} (is the Claude CLI installed and logged in?)`,
         isGlobalFault(err, stderr),
+        faultSignalFor(err, stderr),
       );
     }
 
@@ -139,9 +140,10 @@ function runClaude(prompt: string, extraArgs: string[] = []): Promise<string> {
     // successful generation and then fail downstream as "no JSON object", which is
     // precisely the misdiagnosis that hid the July outage for four days.
     if (err && !env) {
-      throw new AdapterError(
+      failAdapter(
         `${err.message} (partial output: ${stdout.trim().slice(0, 200)})`,
         isGlobalFault(err, stderr),
+        faultSignalFor(err, stderr),
       );
     }
 
@@ -153,14 +155,64 @@ function runClaude(prompt: string, extraArgs: string[] = []): Promise<string> {
       throw new QuotaExhaustedError(c.raw, c.resetAt, c.resetParsed);
     }
     if (c.kind === "error") {
-      throw new AdapterError(err ? `${c.raw} (exit: ${err.message})` : c.raw, c.global);
+      // c.raw is the CLI's own reply (for a global fault it is the synthetic
+      // zero-token message, e.g. the EROFS/401 text) — clean, no prompt. The
+      // err.message suffix is for logs only and never becomes the fault signal.
+      failAdapter(err ? `${c.raw} (exit: ${err.message})` : c.raw, c.global, c.raw);
     }
-    // A real generation got through. If we told the owner the brain was parked,
-    // tell him it is back — keyed off an actual success, not merely the clock
-    // passing the reset time, because the reset time is sometimes a guess.
-    void announceQuotaResumed();
+    // A real generation got through. If we told the owner the brain was parked or
+    // broken, tell him it is back — keyed off an actual success, not merely the clock
+    // passing the reset time, because the reset time is sometimes a guess. One
+    // coordinator so an overlap (quota AND engine both announced) sends ONE "back",
+    // not two near-identical ones.
+    void announceRecovered();
     return c.text;
   });
+}
+
+// Throw an AdapterError, and when it is a GLOBAL fault (the engine, not this
+// request) start the engine-fault persistence clock on the way out — set-if-absent,
+// so the clock marks the first sighting from whichever path saw it first. Fire and
+// forget: recording the fault must not block the throw or depend on the DB.
+// `raw` is the full text for logs (it may carry the prompt via err.message);
+// `faultSignal` is the CLEAN engine-only text (stderr / an err.code label / the
+// CLI's synthetic reply) that names the cause. They are kept separate for the same
+// reason isGlobalFault ignores err.message: otherwise the owner's note would pick
+// the cause shown to him. Only faultSignal is ever recorded or described.
+function failAdapter(raw: string, global: boolean, faultSignal: string): never {
+  if (global) void noteEngineFaultSafe(faultSignal);
+  throw new AdapterError(raw, global, faultSignal);
+}
+
+// The engine's own account of a failed spawn, with NO request text: stderr if it
+// said anything, else a label from the exit code. Never err.message (the prompt)
+// and never stdout (the model's output).
+function faultSignalFor(err: Error, stderr: string): string {
+  const code = (err as NodeJS.ErrnoException).code;
+  return stderr.trim().slice(0, 200) || (code ? `exit code ${code}` : err.message.split(":")[0]);
+}
+
+async function noteEngineFaultSafe(faultSignal: string): Promise<void> {
+  try {
+    const { noteEngineFault } = await import("@/lib/nightshift/quota-alert");
+    noteEngineFault(faultSignal);
+  } catch (e) {
+    console.error(`<3>[quota] could not record engine fault: ${(e as Error).message}`);
+  }
+}
+
+// One "back" on recovery, never two. Quota and engine track separate state, but to
+// the owner "the AI is back" is one fact. Clear quota first (it sends the message if
+// it had announced), then clear engine telling it whether a message already went out
+// so it stays silent instead of sending a duplicate.
+async function announceRecovered(): Promise<void> {
+  try {
+    const { notifyQuotaResumed, clearEngineFault } = await import("@/lib/nightshift/quota-alert");
+    const quotaSpoke = await notifyQuotaResumed();
+    await clearEngineFault(undefined, quotaSpoke);
+  } catch (e) {
+    console.error(`<3>[quota] could not announce recovery: ${(e as Error).message}`);
+  }
 }
 
 // Tell the owner once, off-app, that the engine is parked — the gap this whole
@@ -173,15 +225,6 @@ async function announceQuotaPause(raw: string, resetAt: Date, resetParsed: boole
     await notifyQuotaPaused(raw, resetAt, resetParsed);
   } catch (e) {
     console.error(`<3>[quota] could not announce pause: ${(e as Error).message}`);
-  }
-}
-
-async function announceQuotaResumed(): Promise<void> {
-  try {
-    const { notifyQuotaResumed } = await import("@/lib/nightshift/quota-alert");
-    await notifyQuotaResumed();
-  } catch (e) {
-    console.error(`<3>[quota] could not announce resume: ${(e as Error).message}`);
   }
 }
 

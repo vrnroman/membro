@@ -35,6 +35,9 @@ export function PersonProfile({ personId }: { personId: string }) {
   // Out of quota is its own state, not an error. It gets a calm line and a "back
   // at" instead of the red bug text, because it is neither a bug nor permanent.
   const [quota, setQuota] = useState<{ pausedUntil: string | null } | null>(null);
+  // Engine broken (read-only disk, dead login): also calm, but with a named cause
+  // and no "back at" (there is no reset — a human has to fix it).
+  const [engine, setEngine] = useState<{ cause: string; action: string } | null>(null);
   // True when the read on screen is the deterministic half only (no model).
   const [partial, setPartial] = useState(false);
   const [newNote, setNewNote] = useState("");
@@ -49,6 +52,7 @@ export function PersonProfile({ personId }: { personId: string }) {
     // the last person's "notes only" stamp and quota line onto the next one and
     // suppress their real age stamp.
     setQuota(null);
+    setEngine(null);
     setPartial(false);
     setBriefError(null);
     const res = await fetch(`/api/people/${personId}`, { cache: "no-store" });
@@ -89,11 +93,16 @@ export function PersonProfile({ personId }: { personId: string }) {
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "brief failed");
 
-      // The engine is parked. Say so plainly and keep whatever is already on
-      // screen: a real cached read beats the deterministic half, and replacing it
-      // would lose information for no reason.
-      if (data.quota) {
-        setQuota({ pausedUntil: data.quota.pausedUntil ?? null });
+      // The engine is parked (out of credit) or broken (disk/login). Either way say
+      // so plainly and keep whatever is already on screen: a real cached read beats
+      // the deterministic half, and replacing it would lose information for no reason.
+      if (data.quota || data.engine) {
+        // Set BOTH, so a state that is no longer present is cleared. Otherwise a
+        // stale quota banner from an earlier refresh would linger and mask a newly
+        // broken engine (the engine line is gated on !quota), telling the owner to
+        // wait for an automatic recovery that will never come.
+        setQuota(data.quota ? { pausedUntil: data.quota.pausedUntil ?? null } : null);
+        setEngine(data.engine ? { cause: data.engine.cause, action: data.engine.action } : null);
         if (!brief && data.brief) {
           setBrief(data.brief as BriefContent);
           setPartial(true);
@@ -103,6 +112,7 @@ export function PersonProfile({ personId }: { personId: string }) {
       }
 
       setQuota(null);
+      setEngine(null);
       setPartial(false);
       setBrief(data.brief as BriefContent);
       setBriefMeta({ generatedAt: data.generatedAt ?? null, stale: false });
@@ -251,6 +261,17 @@ export function PersonProfile({ personId }: { personId: string }) {
               ? "The counted lines below are all Membro can write without AI. "
               : "Kept the last read, this could not refresh. "}
             AI is out of quota{quota.pausedUntil ? `, back ${resetLabel(quota.pausedUntil)}` : ", it will retry on its own"}.
+          </p>
+        )}
+
+        {/* A broken engine is also not a bug in THIS brief: a named cause, where to
+            look, no "back at" (a human has to fix it), and no alarming red. */}
+        {engine && !quota && !briefing && (
+          <p className="mb-3 text-xs text-muted-foreground">
+            {partial
+              ? "The counted lines below are all Membro can write without AI. "
+              : "Kept the last read, this could not refresh. "}
+            AI is down, looks like {engine.cause}. To fix: {engine.action}.
           </p>
         )}
 

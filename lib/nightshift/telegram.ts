@@ -23,6 +23,25 @@ const API = "https://api.telegram.org";
 const TIMEOUT_MS = 12000; // Node fetch has no default timeout; bound it ourselves.
 
 export async function sendTelegramMessage(text: string): Promise<SendResult> {
+  // The one kill switch for everything that reaches the owner off-app: the nudge,
+  // the quota alert, and the engine-fault alert all funnel through here. It exists
+  // because a probe of the alert path messaged the owner for real once: the vars it
+  // was meant to be suppressed by live in .env, and Next auto-loads .env, so `env -u`
+  // did not strip them. This var is ADDITIVE and never in .env, so dotenv cannot
+  // re-supply it, and any harness can set MEMBRO_DISABLE_ALERTS=1 to exercise the
+  // alert path with zero risk of a real send.
+  //
+  // It throws (a retryable non-delivery) rather than reporting success, on purpose:
+  // reporting success would let a caller latch its once-per-outage marker, so if the
+  // var were ever left set in the live service, that outage would stay silent even
+  // after the var was removed. Throwing means no marker latches while it is on, and
+  // the moment it comes off the next attempt actually sends. For a probe this is
+  // free (every attempt is suppressed, nothing latches in its throwaway state).
+  if (process.env.MEMBRO_DISABLE_ALERTS === "1") {
+    console.log(`[nudge] suppressed (MEMBRO_DISABLE_ALERTS=1): ${text.slice(0, 80)}`);
+    throw new TelegramSendError("telegram: suppressed by MEMBRO_DISABLE_ALERTS=1", true);
+  }
+
   // Trim: a trailing newline/space from `echo >> .env` is truthy but would break
   // the URL/chat_id and fail every send otherwise.
   const token = process.env.TELEGRAM_BOT_TOKEN?.trim();

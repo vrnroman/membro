@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { generateBriefFor, deterministicBriefFor } from "@/lib/briefs/generate";
 import { getBrief } from "@/lib/repo";
 import { getAdapter } from "@/lib/ai";
-import { QuotaExhaustedError } from "@/lib/ai/quota";
+import { QuotaExhaustedError, AdapterError, describeGlobalFault } from "@/lib/ai/quota";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -36,6 +36,22 @@ export async function POST(req: Request) {
         brief: deterministicBriefFor(personId),
         partial: true,
         quota: { pausedUntil: e.resetParsed ? e.resetAt.toISOString() : null, raw: e.raw },
+        generatedAt: null,
+        adapter: getAdapter().label,
+      });
+    }
+    // A BROKEN engine (read-only disk, dead login) is also a known state, not a bug
+    // in this brief. Same calm treatment as quota: 200 with the deterministic half
+    // and a named cause, so the profile shows "AI is down, looks like X" instead of
+    // the red raw error it used to. Only the global class gets this; a genuine
+    // per-request failure still 502s.
+    if (e instanceof AdapterError && e.global) {
+      return NextResponse.json({
+        brief: deterministicBriefFor(personId),
+        partial: true,
+        // faultSignal, never raw: raw can carry the prompt (err.message echoes the
+        // command line), and the note must not pick the cause shown to the owner.
+        engine: describeGlobalFault(e.faultSignal),
         generatedAt: null,
         adapter: getAdapter().label,
       });

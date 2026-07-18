@@ -441,12 +441,71 @@ export function listCards(): Card[] {
 }
 
 export function deletePendingCards(): void {
-  // Clear the night shift's own pending drafts before it regenerates them, but
-  // SPARE user-initiated chase drafts: those are not regenerable (the night shift
-  // never rebuilds them) and the owner is mid-review of them here and on Suggestions.
+  // Clear the night shift's own pending drafts before it regenerates them, but SPARE
+  // cards the night shift did not create and cannot rebuild: user-initiated chase
+  // drafts, and capture-time connectors (meta.source='capture'). Those were made at
+  // the moment a fact landed, are grounded in that fresh context, and the owner is
+  // mid-review of them here and on Suggestions — regenerating the stack must not
+  // silently erase them.
   db()
-    .prepare("delete from cards where status = 'pending' and coalesce(json_extract(meta, '$.signal'), '') != 'chase'")
+    .prepare(
+      `delete from cards
+       where status = 'pending'
+         and coalesce(json_extract(meta, '$.signal'), '') != 'chase'
+         and coalesce(json_extract(meta, '$.source'), '') != 'capture'`,
+    )
     .run();
+}
+
+// Is there already a connector card covering this pair (and, if asked, this topic)?
+// The one predicate both the capture-time Connector and the nightly builder use to
+// avoid duplicate or repeat intros. Deliberately precise, because the two passes
+// need to narrow it differently:
+//   - `topic` matches against the card's meta.topics ARRAY (a pair can share several
+//     topics, so a card records all the ones that drove it; pair-memory is per topic,
+//     so a genuinely new topic later can still fire).
+//   - `statuses` limits which card states count (pending-only = "live right now";
+//     all = pair-memory, "already shown the owner, whatever they did with it").
+//   - `sources` limits by who made the card ('capture' vs the nightly pass), so the
+//     nightly builder can respect capture cards without tripping over its OWN
+//     regenerable pending cards.
+export function connectorCoversPair(
+  a: string,
+  b: string,
+  opts?: { topic?: string; statuses?: Card["status"][]; sources?: string[] },
+): boolean {
+  const key = [a, b].sort().join("|");
+  const statuses = opts?.statuses ?? (["pending", "approved", "skipped"] as Card["status"][]);
+  const params: unknown[] = [key];
+  const clauses = [`coalesce(json_extract(meta, '$.pairKey'), '') = ?`];
+  if (opts?.topic !== undefined) {
+    // Membership test against the topics ARRAY (so a card that recorded several
+    // topics is remembered for all of them), OR the legacy scalar meta.topic — cards
+    // written before this change, and the nightly signal, carry the scalar. Matching
+    // both means pair-memory never forgets a pre-existing card.
+    clauses.push(
+      `(exists (select 1 from json_each(cards.meta, '$.topics') where json_each.value = ?) or coalesce(json_extract(meta, '$.topic'), '') = ?)`,
+    );
+    params.push(opts.topic, opts.topic);
+  }
+  clauses.push(`status in (${statuses.map(() => "?").join(",")})`);
+  params.push(...statuses);
+  if (opts?.sources) {
+    clauses.push(`coalesce(json_extract(meta, '$.source'), 'nightly') in (${opts.sources.map(() => "?").join(",")})`);
+    params.push(...opts.sources);
+  }
+  const row = db()
+    .prepare(`select 1 from cards where kind = 'connector' and ${clauses.join(" and ")} limit 1`)
+    .get(...params);
+  return !!row;
+}
+
+// Clear this capture's own prior connector card before the crew re-runs, so a job
+// retry replaces rather than stacks (the same rerun-safety the assist output has).
+export function deleteCaptureConnectorsForCapture(captureId: string): void {
+  db()
+    .prepare("delete from cards where kind = 'connector' and json_extract(meta, '$.capture_id') = ?")
+    .run(captureId);
 }
 
 export function insertCards(

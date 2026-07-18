@@ -73,6 +73,20 @@ export type FactConflict = { newFactId: string; oldFactId: string; reason: strin
 // ambiguous mention) — silence is a first-class result.
 export type ResearchBrief = { subject: string; body: string; why: string };
 
+// Per-note crew, the Connector member. When a newly filed fact reveals that the
+// person it is about should meet someone ELSE already on file, the Connector names
+// the intro. Its whole value is the fire bar: it returns null unless there is a
+// SPECIFIC, two-sided reason (one person needs what the other offers), so a mere
+// shared word never becomes a card. `otherId` is who to introduce the subject to,
+// `why` grounds it in a real fact on each side with a direction, `intro` is a short
+// double-opt-in note ready to send. Null = stay silent, a first-class result.
+export type ConnectorSuggestion = { otherId: string; why: string; intro: string };
+
+// A candidate the topic pre-filter turned up: another person who shares at least one
+// topic with the new fact, passed to the model so it can judge whether the match is
+// real. `sharedTopics` is why they surfaced; `facts` is their side of the story.
+export type ConnectorCandidate = { id: string; name: string; sharedTopics: string[]; facts: string[] };
+
 // Pre-Read. The prep "brief" is no longer a wall of prose you read on a click;
 // it is a decision aid, computed in the background and shown the instant a person
 // is opened. Three scannable blocks:
@@ -148,6 +162,15 @@ export interface AiAdapter {
   // Per-note crew, the Researcher: leave a short web-grounded brief for any company
   // or topic the note names that the owner has never logged. [] when nothing warrants it.
   research(input: { note: string; today: string; knownSubjects: string[] }): Promise<ResearchBrief[]>;
+  // Per-note crew, the Connector: given the new note and a shortlist of people who
+  // share a topic with its new fact, name at most ONE intro worth making right now.
+  // null unless a specific two-sided reason exists — a shared word alone is not one.
+  connectNote(input: {
+    note: string;
+    subjectName: string;
+    candidates: ConnectorCandidate[];
+    today: string;
+  }): Promise<ConnectorSuggestion | null>;
   // Diary reflection: a short memo over the owner's own recent entries.
   reflect(entries: string[], today: string): Promise<string>;
 }
@@ -299,4 +322,22 @@ export function sanitizeBriefs(briefs: ResearchBrief[] | undefined, knownSubject
     out.push({ subject, body, why: (b.why || "").trim() });
   }
   return out.slice(0, 3);
+}
+
+// The Connector's fire bar, enforced in code rather than trusted from the prompt:
+// keep the suggestion ONLY when it names a real candidate and carries both a reason
+// and a drafted intro. A missing field means the model could not actually justify
+// the intro, which is exactly the case that must stay silent. Returns null for "no
+// intro worth making," the same first-class silence the Researcher and Ledger use.
+export function sanitizeConnector(
+  s: ConnectorSuggestion | null | undefined,
+  candidateIds: string[],
+): ConnectorSuggestion | null {
+  if (!s || typeof s.otherId !== "string") return null;
+  const ids = new Set(candidateIds);
+  if (!ids.has(s.otherId)) return null; // must be one of the people we actually offered
+  const why = (s.why || "").trim();
+  const intro = (s.intro || "").trim();
+  if (!why || !intro) return null; // no grounded reason or no draft => not a real match
+  return { otherId: s.otherId, why, intro };
 }

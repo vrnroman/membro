@@ -5,6 +5,7 @@ import {
   deleteFactsForCapture,
   deleteAssistsForCapture,
   deleteDiaryForCapture,
+  deleteCaptureConnectorsForCapture,
   deleteCapture,
   pruneEmptyPeople,
 } from "@/lib/repo";
@@ -45,6 +46,7 @@ export async function DELETE(_req: Request, { params }: { params: Promise<{ id: 
   const affected = deleteFactsForCapture(id);
   deleteAssistsForCapture(id);
   deleteDiaryForCapture(id);
+  deleteCaptureConnectorsForCapture(id); // capture connectors are spared the nightly wipe, so clean them here
   deleteCapture(id);
   const removedPeople = pruneEmptyPeople(affected);
   return NextResponse.json({ ok: true, removedPeople });

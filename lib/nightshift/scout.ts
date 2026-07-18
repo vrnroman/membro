@@ -1,5 +1,6 @@
 import type { PersonLite, Signal } from "@/lib/ai/types";
 import { isoToLocalDate, ownerTz } from "@/lib/today";
+import { topicsOf } from "./topics";
 
 // The Scout is pure, deterministic business logic — no AI. It scans the owner's
 // people and facts and surfaces what is "ripe" enough to deserve a finished
@@ -141,22 +142,10 @@ function daysUntilBirthday(today: string, birthday: string): number {
 // Topic tokens used to spot two people who should be introduced: capitalized
 // words of length >= 4 drawn from a person's facts and company, minus their own
 // name tokens. Crude but real — "Berlin", "Stripe", "Series B".
-const TOPIC_STOP = new Set([
-  "got", "moving", "mentioned", "promised", "started", "wants", "spent", "just", "her", "his",
-  "they", "next", "this", "that", "with", "from", "into", "before", "after", "really", "very",
-]);
-
+// topics() and the stop list moved to ./topics so the capture-time Connector shares
+// the exact same definition. This wrapper keeps scout's call sites unchanged.
 function topics(p: PersonRow, facts: FactRow[]): Set<string> {
-  const own = new Set(p.name.toLowerCase().split(/\s+/));
-  const out = new Set<string>();
-  const haystack = [p.company || "", p.blurb || "", ...facts.map((f) => f.content)].join(" ");
-  for (const m of haystack.matchAll(/\b([A-Z][A-Za-z]{3,})\b/g)) {
-    const tok = m[1];
-    const low = tok.toLowerCase();
-    if (own.has(low) || TOPIC_STOP.has(low)) continue;
-    out.add(tok);
-  }
-  return out;
+  return topicsOf(p, facts);
 }
 
 function meetingLabel(today: string, whenISO: string): string {

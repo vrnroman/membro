@@ -1,6 +1,6 @@
 import { db } from "@/lib/db";
 import { getAdapter } from "@/lib/ai";
-import type { AiAdapter, AssistOutput, ResearchBrief } from "@/lib/ai/types";
+import type { AiAdapter, AssistOutput, ResearchBrief, ConnectorCandidate } from "@/lib/ai/types";
 import {
   listPeople,
   listPeopleIdName,
@@ -10,11 +10,15 @@ import {
   getPerson,
   insertAssist,
   insertConflict,
+  insertCards,
+  connectorCoversPair,
+  deleteCaptureConnectorsForCapture,
   deleteAssistsForCapture,
   insertDiaryEntry,
   deleteDiaryForCapture,
 } from "@/lib/repo";
 import { SELF_ID } from "@/lib/nightshift/scout";
+import { topicsOf, sharedTopics, pairKey } from "@/lib/nightshift/topics";
 import {
   type AssistJob,
   type CrewFacts,
@@ -259,6 +263,12 @@ export async function processAssistJob(job: AssistJob): Promise<void> {
   // with the rest.
   const conflicts = await detectAllConflicts(job, today, adapter, (e) => (starved = e));
 
+  // Connector. Best-effort: when a newly filed fact reveals that its person should
+  // meet someone else already on file, draft the intro right now, while the context
+  // is fresh, instead of waiting for the nightly sweep. Silent unless there is a
+  // specific two-sided reason (the model's job); a shared word alone never fires.
+  const connector = starved ? null : await runConnector(job, today, adapter, (e) => (starved = e));
+
   // "Best-effort" means a member may fail without failing the note. It must NOT mean
   // a member is silently SKIPPED because the engine had no credit, and the job then
   // marked done forever: for a photo-only note the Ledger is the only member there
@@ -320,6 +330,44 @@ export async function processAssistJob(job: AssistJob): Promise<void> {
       for (const c of conflicts) {
         insertConflict({ personId: c.personId, newFactId: c.newFactId, oldFactId: c.oldFactId, reason: c.reason });
       }
+      // Connector card. Clear this capture's PRIOR connector unconditionally (like
+      // the assists above), so a reprocess that no longer yields a match removes the
+      // now-wrong old card instead of leaving it stranded on the Stack.
+      //
+      // Note the order: runConnector already ran above and, via pair-memory, will
+      // NOT re-propose a pair whose card still exists — so on a true re-run of the
+      // SAME fact `connector` is null and this delete would just remove the card.
+      // That is unreachable in practice (the queue never re-selects a done job;
+      // reprocess deletes the facts first, so runConnector sees a fresh fact and
+      // re-proposes; a failed transaction rolls back and re-fires clean), which is
+      // why the unconditional delete is safe rather than self-erasing.
+      if (job.capture_id) deleteCaptureConnectorsForCapture(job.capture_id);
+      if (connector) {
+        insertCards([
+          {
+            person_id: connector.personAId,
+            kind: "connector",
+            title: `Introduce ${connector.personAName} and ${connector.personBName}?`,
+            body: connector.intro,
+            why: connector.why,
+            meta: {
+              source: "capture",
+              crew: "connector",
+              capture_id: job.capture_id,
+              // source_fact_id ties the card to a triggering fact, so deleting that
+              // fact (or the note) cleans the card up via the existing card cascade,
+              // now that the nightly wipe spares it.
+              source_fact_id: connector.sourceFactId,
+              personIds: [connector.personAId, connector.personBId],
+              pairKey: pairKey(connector.personAId, connector.personBId),
+              // ALL the topics that drove this pairing, so pair-memory remembers the
+              // whole reason-cluster, not just the first one.
+              topics: connector.topics,
+              topic: connector.topics[0], // primary, for display
+            },
+          },
+        ]);
+      }
       markAssistJobDone(job.id);
     });
     apply();
@@ -330,6 +378,119 @@ export async function processAssistJob(job: AssistJob): Promise<void> {
   console.log(
     `[crew] job ${job.id} -> ${out.kind}` +
       `${briefs.length ? ` +${briefs.length} brief(s)` : ""}` +
-      `${conflicts.length ? ` +${conflicts.length} conflict(s)` : ""}`,
+      `${conflicts.length ? ` +${conflicts.length} conflict(s)` : ""}` +
+      `${connector ? " +1 connector" : ""}`,
   );
+}
+
+// The Connector member. Returns the ONE intro worth making for this note, or null.
+// Pure of writes — the caller commits the card inside the crew transaction.
+//
+// Shape: for each person the note just filed a fact about, take the topics that NEW
+// fact brings up, find others already on file who share one, and hand the shortlist
+// to the model. The model is the fire bar: it names an intro only for a real
+// two-sided reason, else stays silent. A cheap topic pre-filter means the model is
+// only called when there is at least a word in common, and pair-memory means a pair
+// the owner already saw for the same reason is not offered again.
+async function runConnector(
+  job: AssistJob,
+  today: string,
+  adapter: AiAdapter,
+  onStarved: (e: QuotaExhaustedError | AdapterError) => void,
+): Promise<{
+  personAId: string;
+  personAName: string;
+  personBId: string;
+  personBName: string;
+  topics: string[];
+  sourceFactId: string;
+  why: string;
+  intro: string;
+} | null> {
+  if (!job.crew_facts) return null;
+  let crew: unknown;
+  try {
+    crew = JSON.parse(job.crew_facts);
+  } catch {
+    return null;
+  }
+  if (!Array.isArray(crew)) return null;
+
+  // Which of this note's people actually brought up a topic worth pairing on. Do
+  // this cheap check FIRST: if nothing has topics, we never touch the roster.
+  type Person = NonNullable<ReturnType<typeof getPerson>>;
+  const subjects: { cf: CrewFacts; subject: Person; newTopics: Set<string> }[] = [];
+  for (const cf of crew as CrewFacts[]) {
+    if (!cf || !cf.personId || !Array.isArray(cf.factIds) || cf.factIds.length === 0) continue;
+    if (cf.personId === SELF_ID) continue;
+    const subject = getPerson(cf.personId);
+    if (!subject) continue;
+    const newIds = new Set(cf.factIds);
+    const newFacts = listFactsForPerson(cf.personId).filter((f) => newIds.has(f.id));
+    if (!newFacts.length) continue;
+    // The trigger: the topics THIS new fact brings up, not the person's whole history.
+    const newTopics = topicsOf(subject, newFacts);
+    if (newTopics.size) subjects.push({ cf, subject, newTopics });
+  }
+  if (!subjects.length) return null;
+
+  // Only NOW build everyone else's topic set (and their facts, once), since at least
+  // one new fact has a topic to match. n is tiny (a personal CRM).
+  const roster = listPeopleIdName().filter((p) => p.id !== SELF_ID);
+  const topicsByPerson = new Map<string, Set<string>>();
+  const factsByPerson = new Map<string, string[]>();
+  for (const p of roster) {
+    const person = getPerson(p.id);
+    if (!person) continue;
+    const facts = listFactsForPerson(p.id);
+    factsByPerson.set(p.id, facts.map((f) => f.content));
+    topicsByPerson.set(p.id, topicsOf(person, facts));
+  }
+
+  for (const { cf, subject, newTopics } of subjects) {
+    // Candidates: other people who share a new-fact topic, minus any (pair, topic) we
+    // have already surfaced (pair-memory is per topic, across all statuses AND both
+    // passes, so the owner never sees the same reason twice but a genuinely new topic
+    // for the same pair can still fire).
+    const candidates: ConnectorCandidate[] = [];
+    for (const p of roster) {
+      if (p.id === cf.personId) continue;
+      const shared = sharedTopics(newTopics, topicsByPerson.get(p.id) || new Set());
+      const freshTopics = shared.filter((t) => !connectorCoversPair(cf.personId, p.id, { topic: t }));
+      if (!freshTopics.length) continue;
+      candidates.push({ id: p.id, name: p.name, sharedTopics: freshTopics, facts: (factsByPerson.get(p.id) || []).slice(0, 6) });
+    }
+    if (!candidates.length) continue;
+    // Strongest first: more shared topics is a stronger signal. Deterministic.
+    candidates.sort((a, b) => b.sharedTopics.length - a.sharedTopics.length);
+
+    let suggestion;
+    try {
+      suggestion = await adapter.connectNote({ note: job.note, subjectName: subject.name, candidates: candidates.slice(0, 5), today });
+    } catch (e) {
+      // A global fault here is the engine being down, not this note's fault: report
+      // it up so the caller parks the whole note (same as the other members).
+      if (isGlobalFault(e)) onStarved(e as QuotaExhaustedError | AdapterError);
+      console.error(`[crew] connector failed on job ${job.id}:`, (e as Error).message);
+      return null;
+    }
+    if (!suggestion) continue; // model stayed silent for this subject; try the next
+
+    const other = candidates.find((c) => c.id === suggestion.otherId);
+    if (!other) continue; // sanitizeConnector already guards this, belt-and-braces
+    // The candidate filter above already dropped every topic that a card covers, so
+    // by here `other.sharedTopics` are all genuinely new; no separate live-dedup
+    // (the old topic-agnostic pending check dropped valid new-topic intros).
+    return {
+      personAId: cf.personId,
+      personAName: subject.name,
+      personBId: other.id,
+      personBName: other.name,
+      topics: other.sharedTopics,
+      sourceFactId: cf.factIds[0],
+      why: suggestion.why,
+      intro: suggestion.intro,
+    };
+  }
+  return null; // no subject produced an intro worth making
 }

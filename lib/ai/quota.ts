@@ -121,6 +121,37 @@ export const ENGINE_RETRY_MS = 30 * 60_000;
  */
 export const PARK_MAX_AGE_MS = 10 * 86400_000;
 
+// How long a PER-REQUEST failure (a transient claude -p hiccup: a malformed output,
+// a one-off timeout, a bad parse — NOT a global outage, which parks without spending
+// a retry) keeps being retried before the worker gives up. One number so the three
+// workers agree; each keeps its own backoff shape, only this bound is shared.
+export const RETRY_MAX_AGE_MS = 10 * 3600_000; // 10 hours
+
+// The floor that makes the wall-clock bound safe. Age alone is not enough: a job that
+// parked through a multi-day outage (park spends no attempts) is already older than
+// 10h before its FIRST real hiccup, so an age-only test would give up instantly with
+// zero genuine retries — the opposite of "retry ~10h". Requiring a minimum number of
+// actual attempts guarantees every job gets real per-request tries regardless of how
+// long it sat parked.
+export const RETRY_MIN_ATTEMPTS = 6;
+
+/**
+ * Has this item been retried long enough to give up? True only when it has BOTH aged
+ * past the bound AND had a floor of genuine attempts (see RETRY_MIN_ATTEMPTS). A
+ * fresh, steadily-failing note gives up at ~10h; a note that sat parked through an
+ * outage still gets its floor of real tries first. An unparseable timestamp counts as
+ * old, so it terminates on attempts alone rather than never.
+ */
+export function retriedTooLong(createdAtISO: string, attemptsDone: number): boolean {
+  const age = Date.now() - Date.parse(createdAtISO);
+  // "Aged" is anything that is NOT a normal, fresh, positive age within the bound: a
+  // negative age (a future created_at from clock skew) and a NaN (a bad timestamp)
+  // both count as aged, so the attempt floor terminates them rather than letting an
+  // anomalous timestamp loop forever. Only a genuine 0..10h age keeps retrying.
+  const aged = !(age >= 0 && age <= RETRY_MAX_AGE_MS);
+  return aged && attemptsDone >= RETRY_MIN_ATTEMPTS;
+}
+
 const MONTHS = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"];
 
 // Every dated and undated form the real corpus contains:

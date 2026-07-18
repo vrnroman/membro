@@ -7,7 +7,7 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint .",
-    "test": "tsx tests/quota.ts && tsx tests/quota-breaker-drive.ts && tsx tests/quota-jobs.ts && tsx tests/engine-alert.ts && tsx tests/brief-starvation.ts && tsx tests/pipeline.ts && tsx tests/briefs.ts && tsx tests/ledger.ts && tsx tests/crew.ts && tsx tests/connector.ts && tsx tests/captures.ts",
+    "test": "tsx tests/quota.ts && tsx tests/quota-breaker-drive.ts && tsx tests/quota-jobs.ts && tsx tests/voice-giveup.ts && tsx tests/engine-alert.ts && tsx tests/brief-starvation.ts && tsx tests/pipeline.ts && tsx tests/briefs.ts && tsx tests/ledger.ts && tsx tests/crew.ts && tsx tests/connector.ts && tsx tests/captures.ts",
     "test:connector": "tsx tests/connector.ts",
     "test:quota": "tsx tests/quota.ts && tsx tests/quota-breaker-drive.ts && tsx tests/quota-jobs.ts && tsx tests/engine-alert.ts && tsx tests/brief-starvation.ts",
     "test:ledger": "tsx tests/ledger.ts",

@@ -18,7 +18,7 @@ process.env.MEMBRO_DATA_DIR = mkdtempSync(join(tmpdir(), "membro-quotajobs-"));
 import { db } from "@/lib/db";
 import { isGlobalFault } from "@/lib/ai/claude-cli";
 import { enqueueAssistJob, claimDueAssistJobs, parkAssistJob, rescheduleAssistJob } from "@/lib/assist/queue";
-import { MAX_ATTEMPTS } from "@/lib/assist/policy";
+import { retriedTooLong, RETRY_MIN_ATTEMPTS } from "@/lib/ai/quota";
 // Static: unlike claude-cli, quota.ts reads no env at module scope, so hoisting is
 // harmless (and top-level await is not available in this cjs output).
 import {
@@ -178,7 +178,23 @@ console.log("\nquota-jobs: a REAL per-note failure still burns attempts (the par
   const j = jobs[jobs.length - 1];
   rescheduleAssistJob(j.id, new Date(Date.now() + 1000).toISOString(), "a real model hiccup");
   check("a genuine failure still counts", row(j.id).attempts === 1, `attempts=${row(j.id).attempts}`);
-  check("MAX_ATTEMPTS is still a real bound for real failures", MAX_ATTEMPTS === 8, String(MAX_ATTEMPTS));
+}
+
+// The unified per-request give-up: retry ~10h (wall-clock), then give up — but only
+// after a floor of real attempts, so a note that sat parked through a multi-day
+// outage still gets genuine tries instead of insta-giving-up on its first hiccup.
+console.log("\nquota-jobs: the shared ~10h retry give-up (retriedTooLong)");
+{
+  const now = new Date().toISOString();
+  const old = new Date(Date.now() - 11 * 3600_000).toISOString(); // aged past the 10h bound
+  const ancient = new Date(Date.now() - 5 * 86400_000).toISOString(); // parked through a long outage
+  check("a fresh note never gives up, however many attempts", !retriedTooLong(now, 50));
+  check("an aged note gives up once past the attempt floor", retriedTooLong(old, RETRY_MIN_ATTEMPTS));
+  check("an aged note with too few attempts keeps trying (park-through-outage guard)", !retriedTooLong(ancient, RETRY_MIN_ATTEMPTS - 1));
+  check("a bad timestamp still terminates on attempts alone (never loops forever)", retriedTooLong("not-a-date", RETRY_MIN_ATTEMPTS));
+  const future = new Date(Date.now() + 3 * 3600_000).toISOString(); // clock skew: created "in the future"
+  check("a future created_at cannot loop forever (terminates on the floor)", retriedTooLong(future, RETRY_MIN_ATTEMPTS));
+  check("a future created_at still respects the floor first", !retriedTooLong(future, RETRY_MIN_ATTEMPTS - 1));
 }
 
 console.log(failures ? `\n${failures} quota-jobs check(s) FAILED\n` : "\nall quota-jobs checks passed\n");

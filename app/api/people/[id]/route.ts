@@ -8,6 +8,8 @@ import {
   deletePerson,
 } from "@/lib/repo";
 import { parseBrief } from "@/lib/briefs/generate";
+import { quotaBlock } from "@/lib/ai/quota";
+import { engineFaultState } from "@/lib/nightshift/quota-alert";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -25,7 +27,13 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
   // "possible contradiction" review without a second round-trip. Empty most of the
   // time; the profile renders nothing then.
   const conflicts = listPendingConflictsForPerson(id);
-  return NextResponse.json({ person, facts: listFactsForPerson(id), brief, briefMeta, conflicts });
+  // The AI-down state rides along so the calm "out of quota / engine down" line
+  // shows the instant a profile opens during an outage, not only after a manual
+  // refresh. Both null when the engine is healthy (the common case).
+  const block = quotaBlock();
+  const quota = block ? { pausedUntil: block.resetParsed ? block.resetAt.toISOString() : null } : null;
+  const engine = quota ? null : engineFaultState(); // quota takes precedence
+  return NextResponse.json({ person, facts: listFactsForPerson(id), brief, briefMeta, conflicts, quota, engine });
 }
 
 export async function PATCH(req: Request, { params }: { params: Promise<{ id: string }> }) {

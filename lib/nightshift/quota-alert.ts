@@ -181,6 +181,12 @@ export function engineFaultPending(): boolean {
   return !!getKv(SINCE);
 }
 
+/** The live broken-engine state for the profile card on open (null = healthy). */
+export function engineFaultState(): { cause: string; action: string } | null {
+  if (!getKv(SINCE)) return null;
+  return describeGlobalFault(getKv(RAW) || "");
+}
+
 function sinceLabel(iso: string): string {
   const at = new Date(iso);
   if (Number.isNaN(at.getTime())) return "a while ago";

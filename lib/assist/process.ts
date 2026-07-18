@@ -27,8 +27,8 @@ import {
   markAssistJobDone,
   markAssistJobFailed,
 } from "./queue";
-import { backoffMs, MAX_ATTEMPTS } from "./policy";
-import { QuotaExhaustedError, AdapterError, ENGINE_RETRY_MS, PARK_MAX_AGE_MS } from "@/lib/ai/quota";
+import { backoffMs } from "./policy";
+import { QuotaExhaustedError, AdapterError, ENGINE_RETRY_MS, PARK_MAX_AGE_MS, retriedTooLong } from "@/lib/ai/quota";
 
 // Process one queued note as the per-note CREW: several members wake around the
 // note and each does its own thing.
@@ -46,11 +46,9 @@ function isoIn(ms: number): string {
   return new Date(Date.now() + ms).toISOString();
 }
 
-// Bump attempts and push the next try out, or give up once we've tried enough.
-// Shared by the AI-call path and the write path so neither loops forever.
-// Hold a job until the engine has credit again, without spending one of its eight
-// tries. The reset time comes from the CLI itself, so we wait exactly as long as it
-// says (a probe a minute later is floored to QUOTA_MIN_MS by the parser).
+// Hold a job until the engine has credit again, without spending an attempt. The
+// reset time comes from the CLI itself, so we wait exactly as long as it says (a
+// probe a minute later is floored to QUOTA_MIN_MS by the parser).
 function parkForQuota(job: AssistJob, e: QuotaExhaustedError): void {
   if (parkedTooLong(job, `out of AI quota: ${e.raw}`)) return;
   parkAssistJob(job.id, e.resetAt.toISOString(), `paused, out of AI quota: ${e.raw}`);
@@ -93,9 +91,13 @@ function parkForEngineDown(job: AssistJob, e: AdapterError): void {
 
 function backOffOrGiveUp(job: AssistJob, error: string): void {
   const attemptsDone = job.attempts + 1;
-  if (attemptsDone >= MAX_ATTEMPTS) {
-    markAssistJobFailed(job.id, `gave up after ${attemptsDone} tries: ${error}`);
-    console.error(`[crew] job ${job.id} failed permanently: ${error}`);
+  // Retry a transient hiccup for up to RETRY_MAX_AGE_MS (~10h), the bound shared with
+  // the voice worker, then give up. The note and its facts are already saved and the
+  // capture is already in the Notes inbox (fileNote runs before this job), so a
+  // give-up loses only the draft, which the owner can reprocess by hand.
+  if (retriedTooLong(job.created_at, attemptsDone)) {
+    markAssistJobFailed(job.id, `gave up after ~10h of retries: ${error}`);
+    console.error(`<3>[crew] job ${job.id} failed permanently after ~10h: ${error}`);
     return;
   }
   rescheduleAssistJob(job.id, isoIn(backoffMs(attemptsDone)), error);

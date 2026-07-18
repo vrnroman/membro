@@ -8,8 +8,10 @@ import {
   markJobDone,
   markJobFailed,
 } from "./queue";
-import { bgBackoffMs, MAX_BG_ATTEMPTS } from "./policy";
-import { QuotaExhaustedError, AdapterError, ENGINE_RETRY_MS, PARK_MAX_AGE_MS } from "@/lib/ai/quota";
+import { bgBackoffMs } from "./policy";
+import { insertCapture } from "@/lib/repo";
+import { db } from "@/lib/db";
+import { QuotaExhaustedError, AdapterError, ENGINE_RETRY_MS, PARK_MAX_AGE_MS, retriedTooLong } from "@/lib/ai/quota";
 
 // Drive one parked voice note one step further toward "filed", then either
 // finish it, park it again with a longer backoff, or give up. Two stages, and
@@ -38,12 +40,41 @@ function parkedTooLong(job: VoiceJob, reason: string): boolean {
   return true;
 }
 
-/** Bump attempts + push the next try out, or mark failed once we've tried enough. */
-function backOffOrGiveUp(job: VoiceJob, error: string): void {
+// Bump attempts + push the next try out, or give up after ~10h (the bound shared
+// with the assist worker). Giving up on a voice note is the one give-up that could
+// lose something the owner actually SAID: a voice note only becomes a visible Notes
+// entry when fileNote SUCCEEDS, so a failed job's transcript would otherwise sit
+// invisible in voice_jobs forever. So before marking it failed we SALVAGE the
+// already-filed text into the Notes inbox as a plain capture, turning "vanished" into
+// "needs one tap to reprocess".
+//
+// `salvageText` is passed in from the stage that failed (never read off job, whose
+// in-memory transcript can be stale when it was transcribed THIS run) — so a note
+// transcribed at the give-up boundary is salvaged, not lost. Stage 1 (transcription
+// failed, no text yet) passes nothing and keeps the audio for a later retry.
+function backOffOrGiveUp(job: VoiceJob, error: string, salvageText?: string): void {
   const attemptsDone = job.attempts + 1;
-  if (attemptsDone >= MAX_BG_ATTEMPTS) {
-    markJobFailed(job.id, `gave up after ${attemptsDone} tries: ${error}`);
-    console.error(`[voice-worker] job ${job.id} failed permanently: ${error}`);
+  if (retriedTooLong(job.created_at, attemptsDone)) {
+    const text = (salvageText ?? "").trim();
+    if (!text) {
+      markJobFailed(job.id, `gave up after ~10h of retries: ${error}`);
+      console.error(`<3>[voice-worker] job ${job.id} failed permanently after ~10h (nothing to salvage): ${error}`);
+      return;
+    }
+    // Salvage and fail ATOMICALLY: a restart mid-give-up leaves either both (job
+    // failed + capture in Notes) or neither (job still queued, retried clean), never
+    // a duplicate capture. And if the salvage write itself throws, do NOT fail the
+    // job — reschedule, so the transcript gets another chance instead of being lost.
+    try {
+      db().transaction(() => {
+        insertCapture(text, "voice"); // shows in Notes, reprocessable via the captures route
+        markJobFailed(job.id, `gave up after ~10h of retries: ${error}`);
+      })();
+      console.error(`<3>[voice-worker] job ${job.id} gave up after ~10h; salvaged transcript to Notes: ${error}`);
+    } catch (e) {
+      console.error(`<3>[voice-worker] job ${job.id} give-up salvage failed, rescheduling rather than losing it: ${(e as Error).message}`);
+      rescheduleJob(job.id, isoIn(bgBackoffMs(attemptsDone)), error);
+    }
     return;
   }
   rescheduleJob(job.id, isoIn(bgBackoffMs(attemptsDone)), error);
@@ -87,11 +118,10 @@ export async function processJob(job: VoiceJob): Promise<void> {
     markJobDone(job.id);
   } catch (e) {
     // Out of quota is not a hiccup and not this note's fault. Park it until the
-    // engine is back without spending an attempt: MAX_BG_ATTEMPTS buys ~10h on the
-    // assumption that "a quota reset lands well inside that", which is false for a
-    // WEEKLY limit. Charging it here marks the job failed, and a failed job is
-    // never re-claimed, so the transcript survives but is never filed and the
-    // person it was about silently loses that history for good.
+    // engine is back without spending an attempt. Charging it to the per-request
+    // give-up instead would eventually mark the job failed, and a failed job is never
+    // re-claimed, so the transcript would never be filed — the person it was about
+    // silently losing that history.
     if (e instanceof QuotaExhaustedError) {
       if (!parkedTooLong(job, `out of AI quota: ${e.raw}`)) {
         parkVoiceJob(job.id, e.resetAt.toISOString(), `paused, out of AI quota: ${e.raw}`);
@@ -112,8 +142,10 @@ export async function processJob(job: VoiceJob): Promise<void> {
       }
       return;
     }
-    // Extraction (Claude) hiccuped — the transcript is stored, so this only
-    // retries the filing step.
-    backOffOrGiveUp(job, (e as Error).message);
+    // Extraction (Claude) hiccuped — the transcript is stored, so this only retries
+    // the filing step. Pass `text` (this run's real transcript, prefix included) so a
+    // give-up salvages exactly what stage 2 tried to file, even if it was transcribed
+    // moments ago and the in-memory job.transcript is still null.
+    backOffOrGiveUp(job, (e as Error).message, text);
   }
 }

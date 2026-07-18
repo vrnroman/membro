@@ -21,8 +21,10 @@ export const BG_FIRST_DELAY_MS = 10 * 60_000; // 10 minutes
 const BG_BASE_MS = 10 * 60_000; // 10 minutes
 const BG_MAX_MS = 30 * 60_000; //  cap between tries
 
-/** Give up (mark failed, keep the audio) after this many background attempts. */
-export const MAX_BG_ATTEMPTS = 24; // ~10h of trying — a quota reset lands well inside that
+// How long to keep retrying before giving up is the shared wall-clock bound
+// RETRY_MAX_AGE_MS (~10h) in lib/ai/quota.ts, so voice agrees with brief and assist.
+// On give-up the transcript is salvaged into the Notes inbox (see backOffOrGiveUp in
+// process.ts), so a voice note is never silently lost.
 
 /** Backoff before the next background attempt, given how many have already run. */
 export function bgBackoffMs(attemptsDone: number): number {

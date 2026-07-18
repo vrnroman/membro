@@ -67,8 +67,18 @@ export function PersonProfile({ personId }: { personId: string }) {
     setConflicts((data.conflicts ?? []) as Conflict[]);
     setBrief((data.brief ?? null) as BriefContent | null);
     setBriefMeta((data.briefMeta ?? null) as { generatedAt: string | null; stale: boolean } | null);
+    // Show the AI-down state on open, not only after a manual refresh. The cached
+    // brief (if any) stays on screen; this just adds the calm "out of quota / engine
+    // down" line so the profile is honest the instant it opens during an outage.
+    if (data.quota) setQuota({ pausedUntil: data.quota.pausedUntil ?? null });
+    if (data.engine) setEngine({ cause: data.engine.cause, action: data.engine.action });
     setLoading(false);
-    // Never-empty on first open: if nothing is cached yet, build one now.
+    // Never-empty on first open: if nothing is cached yet, build one now. This still
+    // fires during an outage on purpose — the breaker makes the call an instant,
+    // spawn-free throw and the POST answers 200 with the same calm state, so there is
+    // no cost and no error. Gating it on data.quota/data.engine was wrong: a stale
+    // engine flag (recorded but already recovered) would then permanently suppress
+    // the first-open build.
     if (!data.brief && !autoTried.current) {
       autoTried.current = true;
       void generateBrief();

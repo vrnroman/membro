@@ -11,6 +11,8 @@ import type {
   FactConflict,
   FactRef,
   ResearchBrief,
+  ConnectorSuggestion,
+  ConnectorCandidate,
   Signal,
 } from "./types";
 
@@ -333,6 +335,36 @@ export class MockAdapter implements AiAdapter {
       });
     }
     return briefs.slice(0, 2); // never flood a single note with briefs
+  }
+
+  // Deterministic offline Connector. The real (CLI) adapter judges whether the
+  // match is a genuine two-sided reason; the mock can't reason, so it uses a simple
+  // stand-in for the fire bar: it "connects" the first candidate whose shared facts
+  // read as complementary (one side says want/need/looking/raising, the other says
+  // offer/back/invest/help). Otherwise it stays silent, mirroring the real bias.
+  async connectNote(input: {
+    note: string;
+    subjectName: string;
+    candidates: ConnectorCandidate[];
+    today: string;
+  }): Promise<ConnectorSuggestion | null> {
+    const NEEDY = /\b(rais(e|ing)|looking|need|want|seeking|hiring|searching)\b/i;
+    const OFFERY = /\b(back|backs|invest|angel|offer|help|mentor|advis|connect|hir(e|ing) for)\b/i;
+    const noteWants = NEEDY.test(input.note);
+    const noteOffers = OFFERY.test(input.note);
+    for (const c of input.candidates) {
+      const theirs = c.facts.join(" ");
+      const complementary =
+        (noteWants && OFFERY.test(theirs)) || (noteOffers && NEEDY.test(theirs));
+      if (!complementary) continue;
+      const topic = c.sharedTopics[0] || "a shared interest";
+      return {
+        otherId: c.id,
+        why: `${input.subjectName} and ${c.name} are both around ${topic}, and one is looking while the other can help.`,
+        intro: `You two should talk. ${input.subjectName} and ${c.name}, you are both close to ${topic} from different sides. Want me to connect you?`,
+      };
+    }
+    return null; // no complementary match: stay silent, like the real adapter
   }
 
   async reflect(entries: string[]): Promise<string> {

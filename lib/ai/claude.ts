@@ -16,6 +16,9 @@ import {
   FactConflict,
   FactRef,
   ResearchBrief,
+  ConnectorSuggestion,
+  ConnectorCandidate,
+  sanitizeConnector,
   sanitizeBriefs,
   sanitizeConflicts,
   Signal,
@@ -265,6 +268,38 @@ export class ClaudeAdapter implements AiAdapter {
       return sanitizeBriefs(parsed.briefs, input.knownSubjects);
     } catch {
       return [];
+    }
+  }
+
+  async connectNote(input: {
+    note: string;
+    subjectName: string;
+    candidates: ConnectorCandidate[];
+    today: string;
+  }): Promise<ConnectorSuggestion | null> {
+    if (!input.candidates.length) return null;
+    const candidateBlock = input.candidates
+      .map((c) => `- ${c.name} [id: ${c.id}] (shares: ${c.sharedTopics.join(", ")})\n    ${c.facts.slice(0, 6).join("\n    ") || "(no facts)"}`)
+      .join("\n");
+    const system = [
+      "You are Membro's Connector, one of a small crew that reads every note the owner captures. The owner just filed something new about a person; spot when that makes an introduction worth offering, and stay quiet otherwise.",
+      "Suggest AT MOST ONE intro, and only when there is a SPECIFIC, two-sided reason the two should meet: one clearly needs or is looking for what the other has or does. A shared word is NOT a reason. Ground it in a REAL fact on each side and state the direction. If none clears that bar, stay silent: a missed intro is fine, a weak one is not.",
+      "The intro is a short, warm, ready-to-send double opt-in note in the owner's voice. Plain English, no em-dashes.",
+      `Today is ${input.today}. The new note is about ${input.subjectName}.`,
+      'Output ONLY a JSON object: {"otherId":string,"why":string,"intro":string} for the one intro worth making, or {"otherId":null} to stay silent.',
+    ].join("\n");
+    try {
+      const message = await client().messages.create({
+        model: MODEL,
+        max_tokens: 1024,
+        system,
+        messages: [{ role: "user", content: `NOTE:\n${input.note}\n\nCANDIDATES:\n${candidateBlock}` }],
+      } as Anthropic.MessageCreateParamsNonStreaming);
+      const parsed = parseJsonLoose<Partial<ConnectorSuggestion> & { otherId: unknown }>(allText(message));
+      const suggestion = typeof parsed.otherId === "string" ? (parsed as ConnectorSuggestion) : null;
+      return sanitizeConnector(suggestion, input.candidates.map((c) => c.id));
+    } catch {
+      return null; // best-effort: an unparseable answer just means no intro this note
     }
   }
 

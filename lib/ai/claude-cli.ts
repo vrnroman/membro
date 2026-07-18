@@ -15,8 +15,11 @@ import {
   FactConflict,
   FactRef,
   ResearchBrief,
+  type ConnectorCandidate,
+  type ConnectorSuggestion,
   sanitizeBriefs,
   sanitizeConflicts,
+  sanitizeConnector,
   Signal,
 } from "./types";
 import {
@@ -409,6 +412,31 @@ export class ClaudeCliAdapter implements AiAdapter {
       await runClaude(prompt, ["--allowedTools", "WebSearch"]),
     );
     return sanitizeBriefs(parsed.briefs, input.knownSubjects);
+  }
+
+  async connectNote(input: {
+    note: string;
+    subjectName: string;
+    candidates: ConnectorCandidate[];
+    today: string;
+  }): Promise<ConnectorSuggestion | null> {
+    if (!input.candidates.length) return null;
+    const candidateBlock = input.candidates
+      .map((c) => `- ${c.name} [id: ${c.id}] (shares: ${c.sharedTopics.join(", ")})\n    ${c.facts.slice(0, 6).join("\n    ") || "(no facts)"}`)
+      .join("\n");
+    const prompt = [
+      "You are Membro's Connector, one of a small crew that reads every note the owner captures. The owner just filed something new about a person; your job is to spot when that makes an introduction worth offering, and stay quiet otherwise.",
+      "Suggest AT MOST ONE intro, and only when there is a SPECIFIC, two-sided reason the two should actually meet: one of them clearly needs or is looking for what the other has or does. A shared word is NOT a reason. 'Both mention Berlin' is not a reason; 'she is raising a seed round and he backs seed-stage founders' is.",
+      "Ground it in a REAL fact on each side and state the direction (who wants, who offers). If none of the candidates clears that bar, return null: a missed intro is fine, a weak one is not.",
+      "The intro is a short, warm, ready-to-send double opt-in note in the owner's voice (offer to connect them, one line on why, no pressure). Plain English, no em-dashes.",
+      `Today is ${input.today}. The new note is about ${input.subjectName}.`,
+      `NOTE:\n${input.note}`,
+      `CANDIDATES (others already on file who share a topic with the new note):\n${candidateBlock}`,
+      'Output ONLY a JSON object: {"otherId":string,"why":string,"intro":string} for the one intro worth making, or {"otherId":null} to stay silent. `why` names the fact on each side and the direction.',
+    ].join("\n");
+    const parsed = parseJsonObject<Partial<ConnectorSuggestion> & { otherId: unknown }>(await runClaude(prompt));
+    const suggestion = typeof parsed.otherId === "string" ? (parsed as ConnectorSuggestion) : null;
+    return sanitizeConnector(suggestion, input.candidates.map((c) => c.id));
   }
 
   async reflect(entries: string[], today: string): Promise<string> {

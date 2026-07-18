@@ -10,6 +10,7 @@ import {
   FactConflict,
   FactRef,
   ResearchBrief,
+  ConnectorSuggestion,
   Signal,
 } from "./types";
 
@@ -119,6 +120,22 @@ export function observed(adapter: AiAdapter): AiAdapter {
       try {
         const out = await adapter.research(input);
         gen.update({ output: out, metadata: { adapter: adapter.label, briefs: out.length } }).end();
+        return out;
+      } catch (e) {
+        gen.update({ level: "ERROR", statusMessage: (e as Error).message }).end();
+        throw e;
+      }
+    },
+
+    async connectNote(input): Promise<ConnectorSuggestion | null> {
+      const gen = startObservation(
+        "membro.connectNote",
+        { model, input: { note: input.note, subject: input.subjectName, candidates: input.candidates.map((c) => c.name) } },
+        { asType: "generation" },
+      );
+      try {
+        const out = await adapter.connectNote(input);
+        gen.update({ output: out, metadata: { adapter: adapter.label, matched: out ? out.otherId : null } }).end();
         return out;
       } catch (e) {
         gen.update({ level: "ERROR", statusMessage: (e as Error).message }).end();

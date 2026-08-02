@@ -21,6 +21,21 @@
 # state), so parallel starts can't clobber each other and the callback looks its
 # cookie up by nonce.
 #
+# WHY `email_domains = []` IS ENFORCED (the wide-open-login bug, fixed 2026-08-02)
+# ------------------------------------------------------------------------------
+# The gate was set to `email_domains = ["*"]` alongside `authenticated_emails_file`,
+# on the belief that the domain check was permissive but the emails file still
+# narrowed sign-in to the owner. That is backwards. In oauth2-proxy's validator
+# (validator.go, newValidatorImpl) a "*" domain sets allowAll, and the LAST line of
+# the check is `if allowAll { valid = true }` — it overrides the emails-file result
+# unconditionally. So the emails file was dead config and ANY Google account on
+# earth could sign in and read every note. One non-owner account actually did.
+#
+# With email_domains empty, the domain check fails for everyone and the validator
+# falls through to `validUsers.IsValid(email)` — i.e. the emails file becomes the
+# real gate, which is what it was always meant to be. Do NOT put "*" back; to grant
+# someone access, add their address to /etc/oauth2-proxy/authenticated-emails.txt.
+#
 # The oauth2-proxy config lives at /etc/oauth2-proxy/oauth2-proxy.cfg on the VM and
 # is NOT otherwise in git (it holds secrets). This script is the version-controlled
 # source of truth for the NON-secret settings the login needs; it edits the live
@@ -39,6 +54,7 @@ SERVICE="${OAUTH2_PROXY_SERVICE:-oauth2-proxy.service}"
 # here; each is enforced (added if missing, corrected if the value drifted).
 declare -A REQUIRE=(
   [cookie_csrf_per_request]="cookie_csrf_per_request = true"
+  [email_domains]="email_domains = []"
 )
 
 if ! sudo test -f "$CFG"; then

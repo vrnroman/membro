@@ -13,6 +13,7 @@ async function main() {
     console.log("FAIL: LANGFUSE_* env vars not set");
     process.exit(1);
   }
+  const runStart = new Date(Date.now() - 60_000); // a minute of slack for clock skew
   const ai = observed(new MockAdapter());
 
   // A few different AI calls -> a few generations in Langfuse.
@@ -38,28 +39,37 @@ async function main() {
   console.log("sent 5 generations, flushing…");
   await flushLangfuse();
 
-  // Verify via the Langfuse API (ingestion is async, so retry).
+  // Verify via the Langfuse Observations API v2 (the v1 traces list is removed
+  // in Langfuse v4). Bounded to this run's window, so a pass can only come from
+  // the generations sent above, never from an older run's rows.
   const base = process.env.LANGFUSE_BASE_URL!.replace(/\/$/, "");
   const auth = "Basic " + Buffer.from(`${process.env.LANGFUSE_PUBLIC_KEY}:${process.env.LANGFUSE_SECRET_KEY}`).toString("base64");
   const wanted = ["membro.extract", "membro.buildCard", "membro.brief"];
 
   for (let attempt = 1; attempt <= 8; attempt++) {
     await new Promise((r) => setTimeout(r, 3000));
-    const res = await fetch(`${base}/api/public/traces?limit=20`, { headers: { Authorization: auth } });
+    const query = new URLSearchParams({
+      type: "GENERATION",
+      limit: "50",
+      fields: "core,basic",
+      fromStartTime: runStart.toISOString(),
+      toStartTime: new Date(Date.now() + 60_000).toISOString(),
+    });
+    const res = await fetch(`${base}/api/public/v2/observations?${query}`, { headers: { Authorization: auth } });
     if (!res.ok) {
       console.log(`  api attempt ${attempt}: HTTP ${res.status}`);
       continue;
     }
-    const data = (await res.json()) as { data: { name: string; timestamp: string }[] };
-    const names = new Set(data.data.map((t) => t.name));
+    const data = (await res.json()) as { data: { name: string | null; startTime: string }[] };
+    const names = new Set(data.data.map((o) => o.name));
     const found = wanted.filter((w) => names.has(w));
-    console.log(`  api attempt ${attempt}: found ${found.length}/3 expected trace names (${found.join(", ") || "none yet"})`);
+    console.log(`  api attempt ${attempt}: found ${found.length}/3 expected observation names (${found.join(", ") || "none yet"})`);
     if (found.length === 3) {
-      console.log("Langfuse integration works: traces are landing in the project.");
+      console.log("Langfuse integration works: observations are landing in the project.");
       process.exit(0);
     }
   }
-  console.log("FAIL: expected trace names did not appear in Langfuse within the retry window");
+  console.log("FAIL: expected observation names did not appear in Langfuse within the retry window");
   process.exit(1);
 }
 
